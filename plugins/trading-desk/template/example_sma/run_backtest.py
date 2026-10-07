@@ -12,8 +12,14 @@ The gated arm is the one people skip, and skipping it is what makes "AI improved
 my strategy" unfalsifiable. All three arms must see an identical candidate set,
 or the comparison means nothing.
 
-Data comes from Yahoo via yfinance so this runs with no API key at all. Your own
-strategy will probably want core/data.py, which reads Alpaca.
+Data comes from Yahoo via yfinance (NSE symbols end in .NS) so this runs with
+no API key at all. Your own strategy will want core/data.py, which reads Angel
+One's SmartAPI: yfinance is fine for daily bars and useless for intraday ones.
+
+Defaults are NSE ETFs: NIFTYBEES tracks the NIFTY 50, BANKBEES the Bank NIFTY.
+Positions are held for days, so they are delivery (CNC) trades and pay delivery
+charges, and they are long-only: Indian cash equities cannot be held short
+overnight. --allow-shorts exists to compare against the US version, not to trade.
 
   python3 strategies/example_sma/run_backtest.py
   python3 strategies/example_sma/run_backtest.py --arms rules gated
@@ -35,7 +41,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import metrics as M                                              # noqa: E402
 from decision import GateDecider, ModelDecider, RuleDecider       # noqa: E402
-from engine import Engine, EngineConfig                           # noqa: E402
+from engine import Engine, EngineConfig, Instrument               # noqa: E402
+from market import NSE                                            # noqa: E402
 
 from strategy import SMAConfig, SMACrossover                      # noqa: E402
 
@@ -45,7 +52,7 @@ OUT.mkdir(exist_ok=True)
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--symbols", nargs="+", default=["SPY", "QQQ"])
+    p.add_argument("--symbols", nargs="+", default=["NIFTYBEES.NS", "BANKBEES.NS"])
     p.add_argument("--start", default="2015-01-01")
     p.add_argument("--end", default=None)
     p.add_argument("--split", default=None,
@@ -54,7 +61,10 @@ def parse_args() -> argparse.Namespace:
                    choices=["rules", "gated", "laya", "jev"],
                    help="laya needs laya-serve at MODEL_URL (free, local); "
                         "jev needs TYPESAFE_API_KEY and spends money")
-    p.add_argument("--equity", type=float, default=10_000)
+    p.add_argument("--equity", type=float, default=100_000, help="rupees")
+    p.add_argument("--allow-shorts", action="store_true",
+                   help="hold shorts overnight. Not possible in Indian cash equities; "
+                        "only for comparison with the US version")
     p.add_argument("--risk-pct", type=float, default=0.005)
     p.add_argument("--slippage-bps", type=float, default=2.0)
     p.add_argument("--fill", default="next_open", choices=["close", "next_open", "level"])
@@ -83,7 +93,7 @@ def fetch(symbols, start, end) -> dict:
         df.columns = [c.lower() for c in df.columns]
         df = df[["open", "high", "low", "close", "volume"]]
         if df.index.tz is None:
-            df.index = df.index.tz_localize("UTC")
+            df.index = df.index.tz_localize(NSE.tz)
         out[sym] = df
         print("  %s: %d daily bars, %s to %s"
               % (sym, len(df), df.index[0].date(), df.index[-1].date()))
@@ -142,6 +152,8 @@ def main() -> None:
         max_positions=len(args.symbols), max_trades_per_day=1,
         # Daily bars: never flatten intraday, and let a position run.
         flat_at_minute=10_000, max_bars_held=None,
+        allow_shorts=args.allow_shorts,
+        instrument=Instrument(cost_model="india_delivery"),
     )
 
     print("\n=== arms ===")

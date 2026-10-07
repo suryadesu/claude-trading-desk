@@ -21,3 +21,6 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+# SmartAPI SDK writes logs/<date>/app.log wherever it runs
+logs/

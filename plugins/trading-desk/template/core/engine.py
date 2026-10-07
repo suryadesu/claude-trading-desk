@@ -10,9 +10,11 @@ The things that separate this from the backtest in most tutorials:
    NEXT bar. A backtest that fills at a price it needed the completed bar to
    know is reporting fiction.
 
-2. Friction is modelled, per side: slippage in basis points, plus the SEC
-   Section 31 fee and FINRA TAF that land on every sale. Commissions are zero
-   at Alpaca, which is exactly why people forget the rest of it exists.
+2. Friction is modelled, per side: slippage in basis points, plus every charge
+   on the contract note, from core/market.py. On NSE that is brokerage, STT,
+   exchange and SEBI fees, stamp duty and GST on top; in the US it is the SEC
+   and FINRA fees on sales. The commission is the smallest part of it, which is
+   exactly why people forget the rest exists.
 
 3. Ambiguous bars are counted, not hidden. When one bar's range covers both the
    stop and the target, nobody can know which came first without tick data. We
@@ -33,12 +35,7 @@ import pandas as pd
 
 from contracts import Action, Decision, ENTRIES, Snapshot, Trade
 from decision import Decider
-
-# Regulatory costs that apply to SALES only (2025 rates). Equities only;
-# futures pay exchange and clearing fees inside the per-contract commission.
-SEC_FEE_RATE = 27.80 / 1_000_000      # per dollar of principal sold
-TAF_PER_SHARE = 0.000166              # FINRA trading activity fee
-TAF_CAP = 8.30
+from market import NSE, order_charges
 
 
 @dataclass
@@ -46,7 +43,8 @@ class Instrument:
     """
     What is being traded, so the engine can cost it correctly.
 
-    Equities slip in basis points of price and pay regulatory fees on sales.
+    Equities slip in basis points of price and pay the charges of their cost
+    model (core/market.py) on every order.
     Futures slip in ticks, carry a contract multiplier, pay a flat commission
     per contract per side, and are sized against margin rather than notional
     (one MES contract controls ~$30,000 of index at ~$1,500 of margin, so a
@@ -58,24 +56,26 @@ class Instrument:
     slippage_ticks: float = 0.0        # futures: used when > 0
     commission_per_unit: float = 0.0   # per share or per contract, per side
     margin_per_unit: float = 0.0       # futures: intraday margin per contract
-    reg_fees: bool = True              # SEC 31 + FINRA TAF (equities only)
+    # us_equity | india_intraday | india_delivery | none. Futures pay exchange
+    # and clearing fees inside the per-contract commission, so they use none.
+    cost_model: str = "india_intraday"
 
 
 MES = Instrument(kind="future", multiplier=5.0, tick_size=0.25, slippage_ticks=1.0,
-                 commission_per_unit=0.62, margin_per_unit=1500.0, reg_fees=False)
+                 commission_per_unit=0.62, margin_per_unit=1500.0, cost_model="none")
 MNQ = Instrument(kind="future", multiplier=2.0, tick_size=0.25, slippage_ticks=1.0,
-                 commission_per_unit=0.62, margin_per_unit=2000.0, reg_fees=False)
+                 commission_per_unit=0.62, margin_per_unit=2000.0, cost_model="none")
 M2K = Instrument(kind="future", multiplier=5.0, tick_size=0.10, slippage_ticks=1.0,
-                 commission_per_unit=0.62, margin_per_unit=800.0, reg_fees=False)
+                 commission_per_unit=0.62, margin_per_unit=800.0, cost_model="none")
 MYM = Instrument(kind="future", multiplier=0.5, tick_size=1.0, slippage_ticks=1.0,
-                 commission_per_unit=0.62, margin_per_unit=800.0, reg_fees=False)
+                 commission_per_unit=0.62, margin_per_unit=800.0, cost_model="none")
 ES = Instrument(kind="future", multiplier=50.0, tick_size=0.25, slippage_ticks=1.0,
-                commission_per_unit=2.50, margin_per_unit=15000.0, reg_fees=False)
+                commission_per_unit=2.50, margin_per_unit=15000.0, cost_model="none")
 
 
 @dataclass
 class EngineConfig:
-    starting_equity: float = 10_000.0
+    starting_equity: float = 100_000.0
     risk_pct: float = 0.005            # fraction of equity risked per trade (0.5%)
     max_notional_pct: float = 1.00     # cap any single position at this share of equity
     max_positions: int = 3
@@ -92,7 +92,8 @@ class EngineConfig:
     #            your entry can trade through your stop in the same bar.
     fill: str = "close"
     ambiguous: str = "stop_first"       # stop_first | target_first
-    flat_at_minute: int = 385           # minutes from 09:30; 385 = 15:55, flatten before the close
+    # minutes from the open; NSE 350 = 15:05, before the broker's own square-off
+    flat_at_minute: int = NSE.flat_at_minute
     max_bars_held: Optional[int] = None
     allow_shorts: bool = True
     instrument: Instrument = field(default_factory=Instrument)
@@ -169,11 +170,6 @@ def _slip(price: float, is_buy: bool, bps: float,
     return price * factor
 
 
-def _sale_fees(shares: int, price: float) -> float:
-    principal = shares * price
-    return principal * SEC_FEE_RATE + min(shares * TAF_PER_SHARE, TAF_CAP)
-
-
 class Engine:
     def __init__(self, config: Optional[EngineConfig] = None):
         self.cfg = config or EngineConfig()
@@ -241,9 +237,10 @@ class Engine:
 
         fees = self.cfg.commission_per_trade * 2 + self.cfg.commission_per_share * t.shares * 2
         fees += inst.commission_per_unit * t.shares * 2
-        if inst.reg_fees:
-            # The sell side pays regulatory fees: the exit for a long, the entry for a short.
-            fees += _sale_fees(t.shares, fill if t.side > 0 else t.entry_price)
+        # One order in, one order out, each charged as its own side: a long buys
+        # at entry and sells at exit, a short the other way round.
+        fees += order_charges(inst.cost_model, t.side > 0, t.shares, t.entry_price)
+        fees += order_charges(inst.cost_model, t.side < 0, t.shares, fill)
         t.fees = fees
         t.net_pnl = t.gross_pnl - fees
 

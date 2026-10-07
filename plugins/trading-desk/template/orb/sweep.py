@@ -9,7 +9,7 @@ Every configuration is scored twice: on the TRAIN period and on the TEST period
 it never influenced. A config only counts as evidence if it works in both. The
 `consistent` column is the only one worth reading.
 
-  python3 sweep.py --symbols SPY QQQ IWM AAPL MSFT NVDA TSLA AMD \
+  python3 sweep.py --symbols RELIANCE HDFCBANK ICICIBANK INFY TCS SBIN AXISBANK BHARTIARTL \
                    --start 2023-01-01 --split 2025-03-01 --end 2026-09-01
 
 The model arm is deliberately not in this sweep. Searching a grid through a
@@ -37,6 +37,7 @@ import metrics as M                                    # noqa: E402
 from data import fetch_universe                        # noqa: E402
 from decision import GateDecider, RuleDecider          # noqa: E402
 from engine import Engine, EngineConfig                # noqa: E402
+from market import NSE                                 # noqa: E402
 from strategy import ORBConfig, ORBStrategy            # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "out"
@@ -74,14 +75,15 @@ def main() -> None:
     load_env()
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols", nargs="+",
-                    default=["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD"])
+                    default=["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY",
+                             "TCS", "SBIN", "AXISBANK", "BHARTIARTL"])
     ap.add_argument("--start", default="2023-01-01")
     ap.add_argument("--split", default="2025-03-01")
     ap.add_argument("--end", default=None)
     ap.add_argument("--warmup-days", type=int, default=45)
-    ap.add_argument("--equity", type=float, default=25_000.0)
+    ap.add_argument("--equity", type=float, default=100_000.0, help="rupees")
     ap.add_argument("--risk-pct", type=float, default=0.005)
-    ap.add_argument("--slippage-bps", type=float, default=1.0)
+    ap.add_argument("--slippage-bps", type=float, default=2.0)
     ap.add_argument("--or-minutes", nargs="+", type=int, default=[5, 15])
     ap.add_argument("--rr", nargs="+", type=float, default=[1.0, 1.5, 2.0, 3.0])
     ap.add_argument("--variants", nargs="+", default=["base", "retest", "fakeout"])
@@ -90,7 +92,7 @@ def main() -> None:
     warm = (pd.Timestamp(args.start) - pd.Timedelta(days=args.warmup_days)).date().isoformat()
     bars = fetch_universe(symbols=args.symbols, start=warm, end=args.end, minutes=5)
 
-    tz = "America/New_York"
+    tz = NSE.tz
     t0 = pd.Timestamp(args.start, tz=tz)
     tsplit = pd.Timestamp(args.split, tz=tz)
 

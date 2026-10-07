@@ -17,6 +17,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from market import NSE, Market
+
 
 def atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
     prev_close = df["close"].shift(1)
@@ -45,15 +47,17 @@ def session_vwap(df: pd.DataFrame) -> pd.Series:
     return pv / vv.replace(0, np.nan)
 
 
-def minutes_from_open(df: pd.DataFrame, open_hour: int = 9, open_minute: int = 30) -> pd.Series:
-    delta = df.index - df.index.normalize() - pd.Timedelta(hours=open_hour, minutes=open_minute)
+def minutes_from_open(df: pd.DataFrame, market: Market = NSE) -> pd.Series:
+    """Minutes since the market's open, in the index's own (exchange) timezone."""
+    delta = (df.index - df.index.normalize()
+             - pd.Timedelta(hours=market.open.hour, minutes=market.open.minute))
     return pd.Series((delta.total_seconds() / 60).astype(int), index=df.index)
 
 
 def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     """
     Aggregate to a slower timeframe. `label='left', closed='left'` means a bar
-    stamped 09:30 covers 09:30-09:45, so using it at 09:45 is not lookahead.
+    stamped 09:15 covers 09:15-09:30, so using it at 09:30 is not lookahead.
     """
     agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     if "vwap" in df.columns and "volume" in df.columns:
@@ -70,8 +74,8 @@ def align_higher_timeframe(fast: pd.DataFrame, slow: pd.Series, name: str) -> pd
     """
     Carry a higher-timeframe series onto a faster index without leaking.
 
-    A 15-min bar stamped 09:30 is only COMPLETE at 09:45, so its value must not
-    be visible to a 1-min bar before 09:45. We shift the slow series forward one
+    A 15-min bar stamped 09:15 is only COMPLETE at 09:30, so its value must not
+    be visible to a 1-min bar before 09:30. We shift the slow series forward one
     of its own bars before reindexing, which is the whole trick.
     """
     shifted = slow.shift(1)
@@ -96,7 +100,7 @@ def rolling_time_of_day_mean(df: pd.DataFrame, col: str, days: int = 20) -> pd.S
     """
     Average of `col` for this same time of day over the previous `days` sessions.
 
-    Volume at 09:30 is nothing like volume at 14:00, so comparing a bar to a flat
+    Volume at 09:15 is nothing like volume at 14:00, so comparing a bar to a flat
     session average makes every open look like a volume spike. This compares
     like with like, and shift(1) keeps today out of its own baseline.
     """

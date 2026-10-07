@@ -106,17 +106,27 @@ add the ingress rule in the console:
 ```bash
 cd ~/trading-strategies/deploy
 cp .env.example .env
-nano .env          # three Alpaca key pairs. Laya, the decision model, needs no key
+nano .env          # the four ANGEL_* values. Laya, the decision model, needs no key
 docker compose --env-file .env up -d --build
 docker compose ps
 docker compose logs -f orb
 ```
 
-**Three Alpaca accounts.** One paper account per Alpaca login, so a real
-three-way leaderboard needs three signups with three email addresses. Each gets
-its own $10,000 and its own equity curve. The alternative, one account with
-orders tagged per strategy, makes the leaderboard meaningless because the curves
-are not independent.
+**Region.** Create the instance in Mumbai (`ap-mumbai-1`) or Hyderabad
+(`ap-hyderabad-1`): the bot then sits a few milliseconds from the exchange
+instead of an ocean away.
+
+**Simulated by default.** The orb bot reads live NSE prices from Angel One and
+books simulated fills. Angel One has no paper-trading sandbox, so real orders
+are not reachable from the compose file: you would have to add `--real-money` to
+the orb command and `ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES` to its environment,
+on purpose.
+
+**Static IP, if you ever trade for real.** NSE/SEBI rules (April 2026) accept API
+orders only from the static IP registered on your SmartAPI app. Reserve a public
+IP for the instance (Networking -> Reserved public IPs, free on Always Free),
+attach it, and add it to the app at smartapi.angelone.in. Data calls do not need
+it.
 
 First build takes about five minutes on two ARM cores. Everything installs from
 arm64 wheels, so there is no compiler step.
@@ -158,9 +168,10 @@ cat /var/lib/docker/volumes/deploy_state/_data/orb.json | python3 -m json.tool
 Every bot writes `state/<bot>.json` (a snapshot) and `state/<bot>.events.jsonl`
 (an append-only feed). Those two files are the entire dashboard contract.
 
-**Gotcha four: the clock.** The containers are pinned to `America/New_York` via
-`TZ`, because every strategy in this repo reasons in Eastern time. Do not change
-the host timezone and assume the bots follow; they read `TZ` from compose.
+**Gotcha four: the clock.** The containers are pinned to `Asia/Kolkata` via
+`TZ`, because the strategy reasons in IST. Do not change the host timezone and
+assume the bots follow; they read `TZ` from compose. Trading days and holidays
+come from the NSE calendar, not the host.
 
 ---
 
@@ -170,14 +181,14 @@ Each bot honours a kill-switch file. To stop new entries without killing the
 process or touching open positions:
 
 ```bash
-docker compose exec orb touch /app/state/STOP_orb
-docker compose exec orb rm /app/state/STOP_orb      # resume
+docker compose exec orb touch /app/orb/out/STOP
+docker compose exec orb rm /app/orb/out/STOP      # resume
 ```
 
 To flatten everything for one bot immediately:
 
 ```bash
-docker compose exec orb python3 /app/orb_breakout/live.py --flatten
+docker compose exec orb python3 /app/orb/live.py --flatten
 ```
 
 ---
@@ -187,11 +198,12 @@ docker compose exec orb python3 /app/orb_breakout/live.py --flatten
 | item | cost |
 |---|---|
 | Oracle Always Free instance | $0 |
-| Three Alpaca paper accounts | $0 |
-| Laya decisions (self-hosted on the same VM) | $0 |
-| Public dashboard on Cloudflare | $0 within the free tier |
+| Angel One SmartAPI (data, and orders if you ever enable them) | ₹0 |
+| Laya decisions (self-hosted on the same VM) | ₹0 |
+| Reserved public IP (only needed for real orders) | ₹0 on Always Free |
+| Public dashboard on Cloudflare | ₹0 within the free tier |
 
-Nothing a month to run three strategies around the clock with a public
-leaderboard. The expensive part remains your attention, not the infrastructure.
+Nothing a month to run the bot around the clock with a public scoreboard. The expensive part remains your attention, not the infrastructure.
 
-Paper results are hypothetical. Nothing here is financial advice.
+Simulated results are hypothetical. Real-money mode is at your own risk.
+Nothing here is financial advice.

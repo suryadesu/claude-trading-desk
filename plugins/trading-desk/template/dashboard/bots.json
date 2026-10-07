@@ -11,12 +11,12 @@
     {
       "key": "orb",
       "agent": "1",
-      "label": "ORB breakout",
-      "strategy": "Opening range breakout on 8 US stocks, every candidate scored by Laya.",
-      "broker": "Alpaca paper",
+      "label": "NSE ORB",
+      "strategy": "Opening range breakout on 8 NIFTY 50 stocks, every candidate scored by Laya. Angel One data, simulated fills.",
+      "broker": "Angel One (simulated)",
       "model_mode": "gating",
       "model": "laya",
-      "fills": "broker",
+      "fills": "simulated",
       "accent": "#4a9eca"
     }
   ]

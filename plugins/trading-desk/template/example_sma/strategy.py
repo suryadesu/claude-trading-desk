@@ -1,5 +1,5 @@
 """
-strategy.py  --  the example strategy: a moving-average crossover on SPY.
+strategy.py  --  the example strategy: a moving-average crossover on NSE ETFs.
 
 This exists so the pipeline runs end to end the moment you clone the kit. It is
 deliberately one of the most-published rules in trading, which means it is

@@ -78,7 +78,8 @@ def join_outcomes(dec: pd.DataFrame, trades_path: Path, tolerance: str) -> pd.Da
     missing = int(out["R"].isna().sum())
     if missing:
         print(f"[calibrate] {missing} of {len(out)} decisions have no rules-arm trade within "
-              f"{tolerance} (position cap, or a candidate the engine skipped); dropped")
+              f"{tolerance} (position cap, shorts not allowed, or a candidate the engine skipped); "
+              f"dropped")
     return out.dropna(subset=["R"]).reset_index(drop=True)
 
 

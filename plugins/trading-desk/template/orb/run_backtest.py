@@ -5,7 +5,7 @@ run_backtest.py
 Runs the ORB strategy through up to three decision layers over the same data
 and prints them side by side.
 
-  python3 run_backtest.py --symbols SPY QQQ --start 2024-01-01 --arms rules gated
+  python3 run_backtest.py --symbols RELIANCE SBIN --start 2024-01-01 --arms rules gated
   python3 run_backtest.py --arms rules gated laya --max-model-calls 5000
 
 The candidate set is identical across arms by construction: the strategy finds
@@ -30,6 +30,7 @@ import metrics as M                                    # noqa: E402
 from data import DEFAULT_UNIVERSE, fetch_universe      # noqa: E402
 from decision import GateDecider, ModelDecider, RuleDecider  # noqa: E402
 from engine import Engine, EngineConfig                # noqa: E402
+from market import NSE                                 # noqa: E402
 from strategy import ORBConfig, ORBStrategy            # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "out"
@@ -69,10 +70,10 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--fakeout-reentry", action="store_true")
 
     e = p.add_argument_group("execution")
-    e.add_argument("--equity", type=float, default=10_000.0)
+    e.add_argument("--equity", type=float, default=100_000.0, help="rupees")
     e.add_argument("--risk-pct", type=float, default=0.005)
     e.add_argument("--max-positions", type=int, default=3)
-    e.add_argument("--slippage-bps", type=float, default=1.0)
+    e.add_argument("--slippage-bps", type=float, default=2.0)
     e.add_argument("--fill", default="close", choices=["close", "next_open"])
     e.add_argument("--ambiguous", default="stop_first", choices=["stop_first", "target_first"])
     e.add_argument("--no-shorts", action="store_true")
@@ -127,8 +128,8 @@ def build_plans(args) -> dict:
     strat = ORBStrategy(cfg)
     plans = {}
     total_signals = 0
-    trade_from = pd.Timestamp(args.start, tz="America/New_York")
-    trade_to = pd.Timestamp(args.end, tz="America/New_York") if args.end else None
+    trade_from = pd.Timestamp(args.start, tz=NSE.tz)
+    trade_to = pd.Timestamp(args.end, tz=NSE.tz) if args.end else None
     for sym, df in bars.items():
         plan = strat.prepare(df)
         # Warm-up and out-of-window bars built the indicators; they are not tradable.

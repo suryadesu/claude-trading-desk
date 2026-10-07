@@ -58,11 +58,11 @@ cat <<'NEXT'
 ==> bootstrap done. Remaining steps:
 
   1. cd ~/trading-strategies/deploy
-  2. cp .env.example .env   and fill in the three Alpaca key pairs and
-     DATABENTO_API_KEY. The decision model (Laya) is self-hosted and needs no key.
+  2. cp .env.example .env   and fill in the four ANGEL_* values (Angel One
+     SmartAPI). The decision model (Laya) is self-hosted and needs no key.
   3. docker compose --env-file .env up -d --build
      (the first start downloads Laya's weights, a GB or two; laya turns healthy after)
-  4. docker compose ps          # seven services should be "running"
+  4. docker compose ps          # four services should be "running"
   5. docker compose logs -f orb
 
   If you ran deploy/oracle_deploy.sh from the laptop, all of that is already done.

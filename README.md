@@ -5,6 +5,13 @@ paper trading them, and hosting them 24/7 for nothing.
 
 Everything in this stack has a free tier. There is no paid step anywhere.
 
+> **This branch (`laya-angel`) trades Indian stocks on NSE.** Data comes from
+> Angel One's free SmartAPI, the decision model is the open-source
+> [Laya](https://huggingface.co/convaiinnovations/laya), and the live bot books
+> **simulated** fills by default. Angel One has no paper-trading sandbox, so real
+> orders happen only with `--real-money` plus an explicit environment
+> confirmation. See [run.md](run.md) for setup and testing.
+
 ## Install
 
 ```
@@ -27,7 +34,7 @@ Then, in the directory you want the workspace:
 | `trading-desk-method` | The testing discipline, and ten named bugs that each made results look better than they were |
 | `trading-desk-strategy` | The strategy contract, and the causality rules that keep a backtest honest |
 | `trading-desk-laya` | Wiring the open-source Laya decision model as a filter, calibrating it, and how to tell whether it added anything |
-| `trading-desk-paper` | Going live on Alpaca paper: replay validation, kill switches, free-data sharp edges |
+| `trading-desk-paper` | Going live on NSE: simulated fills by default, replay validation, kill switches, Angel One real-money safeguards |
 | `trading-desk-dashboard` | The live desk, server-sent events, animated backtest curves |
 | `trading-desk-oracle` | Free 24/7 hosting, capacity retries, and the two firewalls that catch everyone |
 
@@ -63,11 +70,15 @@ rules as written.
 ## Start here
 
 ```bash
-# no API key at all: proves the harness works end to end
+# no API key at all: proves the harness works end to end (NSE ETFs via Yahoo)
 python3 example_sma/run_backtest.py
 
-# the worked example: opening range breakout on 8 stocks (needs a free Alpaca key)
+# the worked example: opening range breakout on 8 NIFTY 50 stocks
+# (needs a free Angel One SmartAPI key: see run.md)
 python3 orb/run_backtest.py --arms rules gated
+
+# the live bot, simulated fills on live NSE prices
+python3 orb/live.py --once --dry-run
 
 # add the model arm: Laya, open source, served locally (Python >= 3.10, own venv is fine)
 pip install "laya[serve]" && laya-serve          # http://localhost:8000/v1/systemone
@@ -84,11 +95,12 @@ pipeline, not an edge, and the harness will tell you so.
 
 | Thing | Tier | Cost |
 | --- | --- | --- |
-| Alpaca paper trading and IEX data | free | $0 |
-| Oracle Cloud Always Free VM (2 ARM cores, 12 GB) | free forever | $0 |
-| SEC EDGAR filings | public | $0 |
-| Yahoo data via yfinance | free | $0 |
-| Laya decision model (Apache-2.0, runs on the same VM) | open source | $0 |
+| Angel One SmartAPI: NSE candles, live data, order API | free with an Angel One account | ₹0 |
+| Simulated fills (the default) | local | ₹0 |
+| Real orders (only with `--real-money`) | Angel brokerage + statutory charges | ₹20 or 0.1% per order, plus STT, exchange, SEBI, stamp duty and GST |
+| Oracle Cloud Always Free VM (2 ARM cores, 12 GB) | free forever | ₹0 |
+| Yahoo data via yfinance (daily example only) | free | ₹0 |
+| Laya decision model (Apache-2.0, runs on the same VM) | open source | ₹0 |
 
 ## Layout
 

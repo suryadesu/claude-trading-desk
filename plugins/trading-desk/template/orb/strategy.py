@@ -4,7 +4,7 @@ strategy.py — Opening Range Breakout
 Built to the spec the two source videos describe, with every disputed choice
 turned into a parameter instead of an opinion:
 
-  range          high/low of the first `or_minutes` after 09:30 ET
+  range          high/low of the first `or_minutes` after the open (09:15 IST on NSE)
   size filter    range must be between min/max multiples of ATR, else no trade
                  that day (a dead range has nothing to break, a huge one puts
                  the stop too far away to pay for itself)
@@ -14,13 +14,13 @@ turned into a parameter instead of an opinion:
   entry          close of the confirming bar
   stop           the opposite edge of the opening range
   target         stop distance x `rr`
-  window         no entries after `last_entry_min` (11:45 ET by default)
+  window         no entries after `last_entry_min` (11:30 IST by default)
   one and done   a single attempt per symbol per day
 
 Note on the ATR period: the bot video uses 1344, described as "14 days of
 15-minute candles". That is 14 x 96, which is right for a 24-hour forex or
-futures instrument. A US equity session has 26 fifteen-minute bars, so 14 days
-is 364. We derive it from the session length rather than copying the constant.
+futures instrument. An NSE equity session has 25 fifteen-minute bars, so 14 days
+is 350. We derive it from the session length rather than copying the constant.
 
 Variants, off by default so the baseline stays honest:
   require_retest    enter only after price returns to the broken edge, then
@@ -43,8 +43,7 @@ import pandas as pd
 import features as F
 from contracts import Action, Snapshot
 from decision import ModelPrompt
-
-RTH_MINUTES = 390
+from market import NSE, Market
 
 
 @dataclass
@@ -55,11 +54,12 @@ class ORBConfig:
     atr_days: int = 14
     min_atr_mult: float = 0.5     # range must be at least this many ATRs
     max_atr_mult: float = 2.0     # ...and no more than this many
-    last_entry_min: int = 135     # 11:45 ET
+    last_entry_min: int = 135     # minutes after the open: 11:30 IST on NSE
     require_retest: bool = False
     fakeout_reentry: bool = False
     ema_fast: int = 50
     ema_slow: int = 200
+    market: Market = NSE
 
 
 FEATURE_COLS = [
@@ -87,11 +87,11 @@ class ORBStrategy:
         """OHLCV bars in, a plan with signal/stop/target/features out."""
         cfg = self.cfg
         out = df.copy()
-        out["minutes_from_open"] = F.minutes_from_open(out)
+        out["minutes_from_open"] = F.minutes_from_open(out, cfg.market)
 
         # --- higher timeframe context, carried forward without leaking -------
         htf = F.resample(out, f"{cfg.or_minutes}min")
-        bars_per_day = max(1, RTH_MINUTES // cfg.or_minutes)
+        bars_per_day = max(1, cfg.market.rth_minutes // cfg.or_minutes)
         atr_period = max(14, cfg.atr_days * bars_per_day)
 
         htf_atr = F.atr(htf, atr_period)
@@ -157,8 +157,11 @@ class ORBStrategy:
 
         # --- round-number barriers -------------------------------------------
         # Price clusters at whole numbers, and a round level sitting between your
-        # entry and your target is where a breakout runs out of buyers.
-        step = np.where(out["close"] >= 200, 5.0, np.where(out["close"] >= 20, 1.0, 0.5))
+        # entry and your target is where a breakout runs out of buyers. Rupee
+        # prices run an order of magnitude above dollar ones, so the steps do too.
+        step = np.where(out["close"] >= 2000, 50.0,
+                        np.where(out["close"] >= 500, 10.0,
+                                 np.where(out["close"] >= 100, 5.0, 1.0)))
         nxt_up = np.ceil(out["close"] / step) * step
         nxt_dn = np.floor(out["close"] / step) * step
         out["round_above_atr"] = (nxt_up - out["close"]) / out["atr"]
@@ -318,11 +321,15 @@ class ORBStrategy:
         trend_word = {1: "aligned with the higher-timeframe trend",
                       -1: "against the higher-timeframe trend",
                       0: "in a mixed or undecided trend"}[int(g("trend_align"))]
+        mkt = self.cfg.market
+        cur = mkt.currency
         lines = [
             f"Symbol: {symbol}",
-            f"Time: {ts.strftime('%Y-%m-%d %H:%M')} ET, {int(g('minutes_from_open'))} minutes after the open",
-            f"Price: {float(row['close']):.2f}",
-            f"Opening range ({self.cfg.or_minutes} min): high {g('or_high'):.2f}, low {g('or_low'):.2f}, "
+            f"Time: {ts.strftime('%Y-%m-%d %H:%M')} {mkt.tz_label}, "
+            f"{int(g('minutes_from_open'))} minutes after the open",
+            f"Price: {cur}{float(row['close']):.2f}",
+            f"Opening range ({self.cfg.or_minutes} min): high {cur}{g('or_high'):.2f}, "
+            f"low {cur}{g('or_low'):.2f}, "
             f"size {g('or_size_atr'):.2f} ATR",
             f"Breakout: closed {'above the range high' if side == 'long' else 'below the range low'}, "
             f"{g('extension_atr'):.2f} ATR beyond the edge",
@@ -336,7 +343,7 @@ class ORBStrategy:
             f"The range edge was tested {int(g('touches_before_break'))} time(s) before this break",
             f"Session move from the open: {g('trend_atr'):+.2f} ATR; "
             f"overnight gap: {g('overnight_gap_atr'):+.2f} ATR",
-            f"Planned stop: {g('stop'):.2f}, planned target: {g('target'):.2f} "
+            f"Planned stop: {cur}{g('stop'):.2f}, planned target: {cur}{g('target'):.2f} "
             f"(risking 1 to make {self.cfg.rr}); the target is "
             f"{g('room_to_target_atr'):.2f} ATR away",
         ]

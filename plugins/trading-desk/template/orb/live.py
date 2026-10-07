@@ -2,26 +2,33 @@
 """
 live.py
 =======
-Runs the validated ORB strategy against Alpaca paper trading.
+Runs the validated ORB strategy live on NSE, with Angel One for data.
 
 It imports `ORBStrategy` and `ModelDecider` directly from the backtest. Nothing is
 reimplemented here, because a second copy of the logic drifts from the one you
 measured and then your backtest no longer describes what is running.
 
-  python3 live.py --once --dry-run      # one cycle, no orders, safe any time
-  python3 live.py --dry-run             # full session, logs intended orders only
-  python3 live.py                       # submits paper orders
+  python3 live.py --once --dry-run      # one cycle, no fills, safe any time
+  python3 live.py --replay 2026-10-06   # walk a past session through this code, offline fills
+  python3 live.py                       # SIMULATED fills on live prices (the default)
+  python3 live.py --real-money          # REAL orders on Angel One. Read run.md first.
+
+Simulated by default. Angel One has no paper-trading sandbox, so the only safe
+default is to read live prices and book fills locally with the backtest's own
+rules (core/brokers.py SimBroker). --real-money switches to AngelBroker, which
+also needs ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES in the environment and enforces
+its own caps on order value and orders per day.
 
 Safety, all on by default:
-  - paper=True is hardcoded. There is no code path to the live endpoint.
+  - simulated fills unless --real-money AND the environment variable agree
   - a kill switch file (out/STOP) halts new entries without killing the process
   - a daily loss limit flattens and stands down
-  - bracket orders, so the stop and target exist at the broker even if this dies
+  - real entries are ROBO bracket orders, so the stop exists at the broker
   - refuses any order whose stop is on the wrong side of the fill
-  - flattens everything before the close
+  - flattens at 15:05 IST, before Angel's own 15:15 square-off
 
 Every decision and fill is logged in the backtest's schema so live results can be
-reconciled against the backtest's distribution. Realised slippage versus the 1 bp
+reconciled against the backtest's distribution. Realised slippage versus the 2 bp
 assumed is the number most likely to invalidate the whole thing, and it is
 measurable from the first fill.
 """
@@ -43,21 +50,20 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "core"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from alpaca.trading.client import TradingClient                      # noqa: E402
-from alpaca.trading.requests import (MarketOrderRequest, StopLossRequest,   # noqa: E402
-                                     TakeProfitRequest)
-from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce   # noqa: E402
-
+from brokers import AngelBroker, Broker, SimBroker                 # noqa: E402
 from contracts import Action, ENTRIES                                # noqa: E402
 from data import fetch_universe                                      # noqa: E402
 from decision import ModelDecider, RuleDecider                       # noqa: E402
+from market import NSE                                               # noqa: E402
 from strategy import ORBConfig, ORBStrategy                          # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "out"
 OUT.mkdir(exist_ok=True)
 KILL_SWITCH = OUT / "STOP"
 STATE_PATH = OUT / "live_state.json"
-ET = "America/New_York"
+MKT = NSE
+TZ = MKT.tz
+CUR = MKT.currency
 
 
 def load_env(path: Path = ROOT / ".env") -> None:
@@ -121,58 +127,6 @@ class State:
         self.path.write_text(json.dumps(self.data, indent=2))
 
 
-# ----------------------------------------------------------------- broker
-
-class Broker:
-    def __init__(self, dry_run: bool = False):
-        key = os.environ.get("ALPACA_PAPER_KEY", "")
-        secret = os.environ.get("ALPACA_PAPER_SECRET", "")
-        if not key or not secret:
-            raise SystemExit("ALPACA_PAPER_KEY / ALPACA_PAPER_SECRET not set")
-        # paper=True is hardcoded. This is the safety lock.
-        self.client = TradingClient(key, secret, paper=True)
-        self.dry_run = dry_run
-
-    def account(self) -> dict:
-        a = self.client.get_account()
-        return {"equity": float(a.equity), "cash": float(a.cash),
-                "buying_power": float(a.buying_power), "multiplier": float(a.multiplier)}
-
-    def positions(self) -> Dict[str, float]:
-        return {p.symbol: float(p.qty) for p in self.client.get_all_positions()}
-
-    def is_open(self) -> bool:
-        return bool(self.client.get_clock().is_open)
-
-    def submit_bracket(self, symbol: str, side: int, qty: int,
-                       stop: float, target: float) -> Optional[dict]:
-        req = MarketOrderRequest(
-            symbol=symbol, qty=qty,
-            side=OrderSide.BUY if side > 0 else OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,        # everything cancels at the close
-            order_class=OrderClass.BRACKET,
-            take_profit=TakeProfitRequest(limit_price=round(target, 2)),
-            stop_loss=StopLossRequest(stop_price=round(stop, 2)),
-        )
-        if self.dry_run:
-            log(f"  DRY RUN would submit: {'BUY' if side > 0 else 'SELL'} {qty} {symbol} "
-                f"stop {stop:.2f} target {target:.2f}")
-            return None
-        o = self.client.submit_order(req)
-        return {"id": str(o.id), "symbol": symbol, "qty": qty,
-                "side": "buy" if side > 0 else "sell", "status": str(o.status)}
-
-    def flatten_all(self) -> None:
-        pos = self.positions()
-        if not pos:
-            return
-        log(f"flattening {len(pos)} position(s): {list(pos)}")
-        if self.dry_run:
-            return
-        self.client.cancel_orders()
-        self.client.close_all_positions(cancel_orders=True)
-
-
 # ----------------------------------------------------------------- runner
 
 class LiveRunner:
@@ -181,7 +135,7 @@ class LiveRunner:
         self.cfg = ORBConfig(or_minutes=args.or_minutes, exec_minutes=args.exec_minutes,
                              rr=args.rr, last_entry_min=args.last_entry_min)
         self.strat = ORBStrategy(self.cfg)
-        self.broker = Broker(dry_run=args.dry_run)
+        self.broker = make_broker(args)
         self.state = State()
         self.decisions = OUT / "live_decisions.jsonl"
         self.fills = OUT / "live_fills.jsonl"
@@ -203,18 +157,14 @@ class LiveRunner:
         happily hand back a stale frame mid-session, which is exactly how a live
         bot ends up trading yesterday's setup.
 
-        Feed note: the backtest used SIP, but a basic Alpaca subscription refuses
-        SIP data from the last ~15 minutes, which is precisely the bar an intraday
-        breakout needs. IEX is free and real time. Measured over 120 days, IEX
-        prices track SIP to under 1 bp and 87-90% of signals land on the same bar
-        with 100% direction agreement, at the cost of stop levels differing by
-        1-3% of risk. That is the tracking error you accept by not paying for SIP.
+        SmartAPI's candles are real time, and the newest one may still be
+        forming; cycle() only ever looks at bars that have closed.
         """
         ref = as_of or dt.date.today()
         start = (ref - dt.timedelta(days=self.args.warmup_days)).isoformat()
         return fetch_universe(symbols=self.args.symbols, start=start,
                               end=(ref + dt.timedelta(days=1)).isoformat(),
-                              minutes=self.args.exec_minutes, feed=self.args.feed,
+                              minutes=self.args.exec_minutes,
                               use_cache=bool(as_of), verbose=False)
 
     # -- sizing ----------------------------------------------------
@@ -231,9 +181,14 @@ class LiveRunner:
 
     def cycle(self, now_override: Optional[pd.Timestamp] = None,
               bars_override: Optional[Dict[str, pd.DataFrame]] = None) -> None:
-        acct = self.broker.account()
-        now_et = now_override or pd.Timestamp.now(tz=ET)
+        now_et = now_override or pd.Timestamp.now(tz=TZ)
         today = now_et.strftime("%Y-%m-%d")
+        bars = bars_override if bars_override is not None else self.bars()
+        # Let the simulator see every bar that closed since the last cycle, so a
+        # stop or target that traded in between is booked before anything else.
+        for rec in self.broker.on_bar(bars, now_et):
+            jlog(self.fills, {"kind": "exit", **rec})
+        acct = self.broker.account()
         self.state.roll(today, acct["equity"])
 
         # --- guardrails, checked every cycle before anything else -----
@@ -249,23 +204,24 @@ class LiveRunner:
         if dd <= -self.args.daily_loss_pct:
             log(f"DAILY LOSS LIMIT hit ({dd:+.2f}% vs limit -{self.args.daily_loss_pct}%). "
                 f"Flattening and standing down.")
-            self.broker.flatten_all()
+            self.broker.flatten_all("LOSS_LIMIT", now_et)
             self.state.halt()
             return
 
         held = self.broker.positions()
-        bars = bars_override if bars_override is not None else self.bars()
-        mfo = (now_et - now_et.normalize() - pd.Timedelta(hours=9, minutes=30)).total_seconds() / 60
+        mfo = (now_et - now_et.normalize()
+               - pd.Timedelta(hours=MKT.open.hour, minutes=MKT.open.minute)).total_seconds() / 60
 
         # --- flatten before the close ---------------------------------
-        if mfo >= self.args.flat_at_minute and held:
-            self.broker.flatten_all()
+        if mfo >= self.args.flat_at_minute:
+            if held:
+                self.broker.flatten_all("EOD", now_et)
             return
 
         if now_override is None:
-            log(f"cycle: equity ${acct['equity']:,.2f} ({dd:+.2f}% today)  "
-                f"bp ${acct['buying_power']:,.0f}  positions {len(held)}  "
-                f"{mfo:.0f} min from open")
+            log(f"cycle: equity {CUR}{acct['equity']:,.2f} ({dd:+.2f}% today)  "
+                f"bp {CUR}{acct['buying_power']:,.0f}  positions {len(held)}  "
+                f"{mfo:.0f} min from open  [{self.broker.name}]")
 
         for sym, df in bars.items():
             if sym in held or self.state.has_entered(sym):
@@ -275,10 +231,11 @@ class LiveRunner:
                 continue
 
             plan = self.strat.prepare(df)
-            today_bars = plan[plan.index.normalize() == pd.Timestamp(today, tz=ET)]
-            if now_override is not None:
-                # Never let the simulated clock see a bar that has not closed yet.
-                today_bars = today_bars[today_bars.index < now_override]
+            today_bars = plan[plan.index.normalize() == pd.Timestamp(today, tz=TZ)]
+            # Only bars that have CLOSED. A bar stamped t covers [t, t + bar), and
+            # SmartAPI hands back the one still forming; trading it is lookahead.
+            today_bars = today_bars[today_bars.index
+                                    + pd.Timedelta(minutes=self.args.exec_minutes) <= now_et]
             if today_bars.empty:
                 continue
             last = today_bars.iloc[-1]
@@ -318,20 +275,24 @@ class LiveRunner:
                 jlog(self.decisions, {**rec, "submitted": False, "refused": "zero_size"})
                 continue
             if qty * price > acct["buying_power"]:
-                log(f"  {sym}: ${qty * price:,.0f} exceeds buying power, skipping")
+                log(f"  {sym}: {CUR}{qty * price:,.0f} exceeds buying power, skipping")
                 jlog(self.decisions, {**rec, "submitted": False, "refused": "buying_power"})
                 continue
 
             log(f"  {sym}: {last['signal'].upper()} approved p={rec['prob']:.2f} -> "
                 f"{qty} shares @ ~{price:.2f}, stop {stop:.2f}, target {target:.2f} "
-                f"(risk ${abs(price - stop) * qty:.0f})")
+                f"(risk {CUR}{abs(price - stop) * qty:.0f})")
             try:
-                order = self.broker.submit_bracket(sym, side, qty, stop, target)
+                order = self.broker.submit_bracket(sym, side, qty, stop, target, price,
+                                                   bar_ts=today_bars.index[-1])
             except Exception as e:
                 log(f"  {sym}: ORDER REJECTED {type(e).__name__}: {str(e)[:140]}")
                 jlog(self.decisions, {**rec, "submitted": False, "error": str(e)[:200]})
                 continue
 
+            if order is None:
+                jlog(self.decisions, {**rec, "submitted": False, "refused": "broker"})
+                continue
             self.state.mark(sym)
             jlog(self.decisions, {**rec, "submitted": True, "qty": qty, "order": order})
             # signal_close vs actual fill is how you measure real slippage
@@ -348,21 +309,31 @@ class LiveRunner:
         nothing. This is how you check that live.py and the backtest agree: any
         difference here is a bug in one of them, not a market condition.
         """
-        self.broker.dry_run = True
+        # Replays never touch a broker: a fresh simulator, its own state files.
+        for f in (OUT / "replay_sim_state.json", OUT / "replay_sim_trades.jsonl",
+                  OUT / "replay_state.json"):
+            f.unlink(missing_ok=True)
+        self.broker = SimBroker(OUT / "replay_sim_state.json", OUT / "replay_sim_trades.jsonl",
+                                equity=self.args.sim_equity,
+                                slippage_bps=self.args.slippage_bps, log=log)
+        self.state = State(OUT / "replay_state.json")
         ref = dt.date.fromisoformat(day)
         bars = self.bars(as_of=ref)
-        day_ts = pd.Timestamp(day, tz=ET)
+        day_ts = pd.Timestamp(day, tz=TZ)
         stamps = sorted({t for df in bars.values()
                          for t in df.index if t.normalize() == day_ts})
         if not stamps:
             log(f"no bars for {day} (market holiday or weekend?)")
             return
-        log(f"replaying {day}: {len(stamps)} bars, {len(bars)} symbols, orders disabled")
+        log(f"replaying {day}: {len(stamps)} bars, {len(bars)} symbols, simulated fills")
         for ts in stamps:
             # the clock stands just after this bar closed
             self.cycle(now_override=ts + pd.Timedelta(minutes=self.args.exec_minutes),
                        bars_override=bars)
-        log("replay complete")
+        self.broker.flatten_all("EOD", stamps[-1] + pd.Timedelta(minutes=self.args.exec_minutes))
+        acct = self.broker.account()
+        log(f"replay complete: equity {CUR}{acct['equity']:,.2f}; "
+            f"trades in {OUT / 'replay_sim_trades.jsonl'}")
 
     def run(self) -> None:
         if self.args.replay:
@@ -377,15 +348,16 @@ class LiveRunner:
         while True:
             try:
                 if not self.broker.is_open():
-                    clock = self.broker.client.get_clock()
-                    wait = max(30.0, (clock.next_open - dt.datetime.now(dt.timezone.utc)).total_seconds())
-                    log(f"market closed. next open {clock.next_open}. sleeping {wait/60:.0f} min")
+                    nxt = self.broker.next_open()
+                    wait = max(30.0, (nxt - pd.Timestamp.now(tz=TZ)).total_seconds())
+                    log(f"market closed. next open {nxt:%Y-%m-%d %H:%M} {MKT.tz_label}. "
+                        f"sleeping {min(wait, 3600)/60:.0f} min")
                     time.sleep(min(wait, 3600))
                     continue
                 self.cycle()
             except KeyboardInterrupt:
-                log("interrupted. open positions are left alone; "
-                    "brackets are at the broker. Use --flatten to close.")
+                log("interrupted. open positions are left alone (real brackets stay at "
+                    "the broker; simulated ones in out/sim_state.json). Use --flatten to close.")
                 return
             except Exception as e:
                 log(f"cycle error {type(e).__name__}: {str(e)[:160]}")
@@ -397,39 +369,78 @@ class LiveRunner:
             time.sleep(max(5.0, (nxt - now).total_seconds() + self.args.bar_buffer_sec))
 
 
+def make_broker(args) -> Broker:
+    if args.real_money:
+        b = AngelBroker(OUT / "angel_state.json", max_order_value=args.max_order_value,
+                        max_orders_per_day=args.max_orders_per_day,
+                        entry_band_bps=args.entry_band_bps, robo_units=args.robo_units,
+                        log=log, dry_run=args.dry_run)
+        acct = b.account()
+        log("=" * 72)
+        log("REAL MONEY MODE: orders go to Angel One and are NOT simulated.")
+        log(f"  account equity {CUR}{acct['equity']:,.2f}, available {CUR}{acct['cash']:,.2f}")
+        log(f"  caps: {CUR}{args.max_order_value:,.0f} per order, "
+            f"{args.max_orders_per_day} orders per day, daily loss {args.daily_loss_pct}%")
+        log("  orders are only accepted from the static IP registered on your SmartAPI app")
+        log(f"  dry run: {args.dry_run}.  Ctrl+C now to abort; starting in 10 s.")
+        log("=" * 72)
+        time.sleep(10)
+        return b
+    return SimBroker(OUT / "sim_state.json", OUT / "sim_trades.jsonl",
+                     equity=args.sim_equity, slippage_bps=args.slippage_bps,
+                     log=log, dry_run=args.dry_run)
+
+
 def parse_args():
-    p = argparse.ArgumentParser(description="Paper-trade the ORB strategy on Alpaca.")
+    p = argparse.ArgumentParser(
+        description="Run the ORB strategy on NSE: simulated fills by default, "
+                    "real Angel One orders only with --real-money.")
     p.add_argument("--symbols", nargs="+",
-                   default=["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD"])
+                   default=["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY",
+                            "TCS", "SBIN", "AXISBANK", "BHARTIARTL"])
     p.add_argument("--decider", default="laya", choices=["laya", "jev", "rules"],
                    help="laya: the local laya-serve sidecar at MODEL_URL. jev: the same "
-                        "client pointed at hosted Jev (set MODEL_URL/MODEL_NAME/MODEL_API_KEY)")
+                        "client pointed at hosted Jev (JEV_URL/JEV_MODEL/TYPESAFE_API_KEY)")
     p.add_argument("--model-threshold", "--jev-threshold", dest="model_threshold",
                    type=float, default=0.30,
-                   help="0.30 is what Jev's shadow calibration supported. It does not carry "
-                        "over to Laya: refit it with core/calibrate.py on in-sample decisions")
+                   help="a placeholder: refit it with core/calibrate.py on in-sample "
+                        "NSE decisions before trusting it")
     p.add_argument("--model-temperature", type=float, default=1.0,
                    help="temperature fitted by core/calibrate.py; 1.0 = raw model output")
     p.add_argument("--or-minutes", type=int, default=15)
     p.add_argument("--exec-minutes", type=int, default=5)
     p.add_argument("--rr", type=float, default=2.0)
-    p.add_argument("--last-entry-min", type=int, default=135)
-    p.add_argument("--flat-at-minute", type=int, default=385)
+    p.add_argument("--last-entry-min", type=int, default=135, help="135 = 11:30 IST")
+    p.add_argument("--flat-at-minute", type=int, default=MKT.flat_at_minute,
+                   help=f"{MKT.flat_at_minute} = 15:05 IST, before Angel's 15:15 square-off")
     p.add_argument("--risk-pct", type=float, default=0.005)
     p.add_argument("--max-notional-pct", type=float, default=1.0)
     p.add_argument("--max-positions", type=int, default=3)
     p.add_argument("--daily-loss-pct", type=float, default=2.0)
-    p.add_argument("--feed", default="iex", choices=["iex", "sip"],
-                   help="iex is free and real time. sip matches the backtest but a basic "
-                        "subscription blocks the most recent 15 minutes, which is the bar "
-                        "this strategy trades on.")
     p.add_argument("--warmup-days", type=int, default=60)
     p.add_argument("--bar-buffer-sec", type=float, default=20.0)
     p.add_argument("--once", action="store_true", help="one cycle then exit")
     p.add_argument("--replay", default=None, metavar="YYYY-MM-DD",
-                   help="walk a past session through the live code path, no orders")
-    p.add_argument("--dry-run", action="store_true", help="log intended orders, submit nothing")
+                   help="walk a past session through the live code path, simulated fills")
+    p.add_argument("--dry-run", action="store_true", help="log intended orders, fill nothing")
     p.add_argument("--flatten", action="store_true", help="close everything and exit")
+
+    sim = p.add_argument_group("simulated fills (default)")
+    sim.add_argument("--sim-equity", type=float, default=100_000.0,
+                     help="starting capital in rupees for the simulator")
+    sim.add_argument("--slippage-bps", type=float, default=2.0)
+
+    real = p.add_argument_group("REAL MONEY on Angel One")
+    real.add_argument("--real-money", action="store_true",
+                      help="place real orders. Also needs ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES")
+    real.add_argument("--max-order-value", type=float, default=20_000.0,
+                      help="refuse any single order above this many rupees")
+    real.add_argument("--max-orders-per-day", type=int, default=3)
+    real.add_argument("--entry-band-bps", type=float, default=10.0,
+                      help="how far through the signal close the entry LIMIT is priced")
+    real.add_argument("--robo-units", default="points", choices=["points", "price"],
+                      help="how ROBO squareoff/stoploss are sent: rupees from entry "
+                           "(points) or absolute prices. Confirm on your account first.")
     return p.parse_args()
 
 
@@ -437,7 +448,7 @@ def main() -> None:
     load_env()
     args = parse_args()
     if args.flatten:
-        Broker(dry_run=False).flatten_all()
+        make_broker(args).flatten_all("FLATTEN")
         return
     LiveRunner(args).run()
 

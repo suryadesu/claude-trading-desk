@@ -1,14 +1,17 @@
-# Four bots, a decision model, a dashboard, a keepalive, one state volume. Built
-# for Oracle Cloud Always Free (Ampere A1, ARM64, 2 OCPU / 12 GB).
+# An NSE bot, a decision model, a dashboard and a keepalive. Built for Oracle
+# Cloud Always Free (Ampere A1, ARM64, 2 OCPU / 12 GB); pick the Mumbai or
+# Hyderabad region so the bot sits close to the exchange.
 #
 #   docker compose --env-file .env up -d --build
 #   docker compose logs -f orb
 #   open http://<vm-public-ip>:8080        the scoreboard
 #   docker compose down
 #
-# Each Alpaca bot gets its own paper account so the leaderboard is real. One
-# paper account per Alpaca login, so that means three signups. The lvl bot needs
-# no broker: it reads live CME data from Databento and simulates its own fills.
+# The orb bot reads live NSE prices from Angel One and books SIMULATED fills.
+# Angel One has no paper-trading sandbox, so real orders are deliberately not
+# reachable from this file: going live means adding --real-money to the orb
+# command below AND ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES to its environment,
+# and registering this VM's static IP on your SmartAPI app. Read run.md first.
 #
 # The decision model is Laya, served by the `laya` service on the internal
 # network only. It has no published port: nothing outside this compose project
@@ -21,9 +24,10 @@ x-bot: &bot
   restart: unless-stopped
   volumes:
     - state:/app/state
-    - cache:/app/cache
+    - cache:/app/core/cache          # scrip master, bar cache, Laya decision cache
+    - orb-out:/app/orb/out           # simulator state and every decision/fill log
   environment: &bot-env
-    TZ: America/New_York
+    TZ: Asia/Kolkata
     BOT_STATE_DIR: /app/state
     MODEL_URL: http://laya:8000/v1/systemone
     MODEL_NAME: ${MODEL_NAME:-typed-decisions}
@@ -59,7 +63,7 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
 
-  orb:                       # agent 1: opening range breakout, filtered by Laya
+  orb:                       # NSE opening range breakout, filtered by Laya, simulated fills
     <<: *bot
     container_name: orb
     depends_on:
@@ -68,52 +72,18 @@ services:
     environment:
       <<: *bot-env
       BOT: orb
-      ALPACA_PAPER_KEY: ${ORB_ALPACA_KEY}
-      ALPACA_PAPER_SECRET: ${ORB_ALPACA_SECRET}
+      ANGEL_API_KEY: ${ANGEL_API_KEY}
+      ANGEL_CLIENT_CODE: ${ANGEL_CLIENT_CODE}
+      ANGEL_MPIN: ${ANGEL_MPIN}
+      ANGEL_TOTP_SECRET: ${ANGEL_TOTP_SECRET}
       BOT_NAME: orb
-      BOT_LABEL: ORB breakout
+      BOT_LABEL: NSE ORB
     # Threshold and temperature come from core/calibrate.py on the in-sample
-    # half. 0.30 was Jev's number; it is only a placeholder for Laya.
+    # half of an NSE backtest. 0.30 is only a placeholder.
     command: ["--decider", "laya",
               "--model-threshold", "${ORB_MODEL_THRESHOLD:-0.30}",
-              "--model-temperature", "${ORB_MODEL_TEMPERATURE:-1.0}"]
-
-  insider:                   # agent 3c: corporate insider purchases
-    <<: *bot
-    container_name: insider
-    environment:
-      <<: *bot-env
-      BOT: insider
-      ALPACA_PAPER_KEY: ${INSIDER_ALPACA_KEY}
-      ALPACA_PAPER_SECRET: ${INSIDER_ALPACA_SECRET}
-      BOT_NAME: insider
-      BOT_LABEL: Insider filings
-    command: ["--hold", "5", "--slots", "10"]
-
-  pead:                       # agent 3b: post-earnings drift, SPY-hedged
-    <<: *bot
-    container_name: pead
-    environment:
-      <<: *bot-env
-      BOT: pead
-      ALPACA_PAPER_KEY: ${PEAD_ALPACA_KEY}
-      ALPACA_PAPER_SECRET: ${PEAD_ALPACA_SECRET}
-      BOT_NAME: pead
-      BOT_LABEL: Earnings drift
-    # No strategy flags: live_pead.py holds gap >= 5% and a 10-session hold in
-    # its own LOCKED dict, and defines no arguments to override them.
-    command: []
-
-  lvl:                       # agent 2: overnight index futures, Databento live data,
-    <<: *bot                 #          self-simulated fills, no broker
-    container_name: lvl
-    environment:
-      <<: *bot-env
-      BOT: lvl
-      BOT_NAME: lvl
-      BOT_LABEL: Overnight futures
-      DATABENTO_API_KEY: ${DATABENTO_API_KEY}
-    command: ["--blocks", "0", "--min-confirm", "1"]
+              "--model-temperature", "${ORB_MODEL_TEMPERATURE:-1.0}",
+              "--sim-equity", "${ORB_SIM_EQUITY:-100000}"]
 
   dashboard:                 # the public scoreboard: reads the state volume, trades nothing
     build:
@@ -128,9 +98,10 @@ services:
       # not be able to corrupt the state the bots are writing.
       - state:/app/state:ro
     environment:
-      TZ: America/New_York
+      TZ: Asia/Kolkata
       BOT_STATE_DIR: /app/state
       DASHBOARD_PORT: "8080"
+      DASHBOARD_CURRENCY: "₹"
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -146,4 +117,5 @@ services:
 volumes:
   state:
   cache:
+  orb-out:
   models:

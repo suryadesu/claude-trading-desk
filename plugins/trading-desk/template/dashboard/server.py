@@ -100,6 +100,8 @@ _remote_lock = threading.Lock()
 SERIES = ["#e0595f", "#4a9eca", "#d4a13c", "#2f855a", "#7b61c4", "#15161a"]
 
 BOTS_FILE = Path(os.environ.get("DASHBOARD_BOTS", HERE / "bots.json"))
+# Every money figure on the page is in this currency. "\u20b9" is the rupee sign.
+CURRENCY = os.environ.get("DASHBOARD_CURRENCY", "\u20b9")
 
 DEFAULT_BOTS: List[Dict[str, Any]] = [
     {
@@ -107,7 +109,7 @@ DEFAULT_BOTS: List[Dict[str, Any]] = [
         "agent": "1",
         "label": "Example strategy",
         "strategy": "Replace this in dashboard/bots.json with your own.",
-        "broker": "Alpaca paper",
+        "broker": "Angel One (simulated)",
         "model_mode": "none",
         "model": "",
         "fills": "broker",
@@ -471,6 +473,7 @@ def build_state() -> dict:
 
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "currency": CURRENCY,
         "t": now,
         "state_dir": str(STATE_DIR),
         "bots": bots,

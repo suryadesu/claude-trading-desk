@@ -17,7 +17,11 @@ Set up a trading workspace for the user in the current directory.
    `python3 -c "import sys; sys.path.insert(0,'core'); import engine, decision, contracts, botstate"`
 6. Tell the user the three things they can do next, shortest first:
    - `python3 example_sma/run_backtest.py` needs no API key at all
-   - `python3 orb/run_backtest.py --arms rules gated` needs Alpaca (free)
+   - `python3 orb/run_backtest.py --arms rules gated` needs an Angel One
+     SmartAPI key (free; the four ANGEL_* values in `.env`)
+   - `python3 orb/live.py --once --dry-run` runs the live bot with simulated fills.
+     Real orders need `--real-money` and `ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES`;
+     never set either on the user's behalf
    - `python3 dashboard/server.py` opens the desk
    - the `laya` arm needs the free Laya model running locally:
      `pip install "laya[serve]" && laya-serve` (Python >= 3.10, its own venv is

@@ -1,17 +1,22 @@
-# Testing the Laya setup
+# Testing the NSE setup (Angel One + Laya)
 
-How to check that the trading desk works with the open-source
-[Laya](https://huggingface.co/convaiinnovations/laya) decision model, from a
-first smoke test through to the full Docker stack.
+How to check that the trading desk works on Indian stocks: NSE data from Angel
+One's SmartAPI, the open-source [Laya](https://huggingface.co/convaiinnovations/laya)
+decision model, and the live bot's simulated fills. It goes from a first smoke
+test through to the full Docker stack. Real-money trading is covered last, and
+only as an option.
 
 Each level depends on the one before it. Levels 1 to 3 need no API keys at all.
 
 | Level | What it proves | Needs |
 | --- | --- | --- |
 | 1. Model server | Laya runs and answers requests | Python 3.10+ |
-| 2. Keyless backtest | The `laya` arm works end to end on real market data | Level 1 |
+| 2. Keyless backtest | The `laya` arm works end to end on real NSE data, with Indian charges | Level 1 |
 | 3. Calibration and replay | Threshold fitting works, and results are reproducible | Level 2 |
-| 4. ORB and Docker | The real strategy and the deployed stack | A free Alpaca paper key, Docker |
+| 4. Angel One data and ORB | The real strategy on NSE intraday data | A free Angel One SmartAPI key |
+| 5. Live bot, simulated fills | The live loop on live NSE prices, no orders | Level 4, market hours |
+| 6. Docker | The deployed stack | Docker |
+| 7. Real money (optional) | Real orders on Angel One | Static IP, explicit consent |
 
 All commands run from the template folder:
 
@@ -19,9 +24,13 @@ All commands run from the template folder:
 cd plugins/trading-desk/template
 ```
 
-They use Git Bash syntax with explicit paths into each virtual environment,
-so nothing needs activating. On macOS or Linux, use `bin/` instead of
-`Scripts/` in the venv paths.
+They use Git Bash syntax with explicit paths into each virtual environment, so
+nothing needs activating. On macOS or Linux, use `bin/` instead of `Scripts/` in
+the venv paths.
+
+**Angel One has no paper-trading sandbox.** Every order its API accepts is real.
+That is why the live bot books simulated fills by default, and why real orders
+need both a flag and an environment variable (Level 7).
 
 ---
 
@@ -30,9 +39,9 @@ so nothing needs activating. On macOS or Linux, use `bin/` instead of
 Laya runs as its own server, separate from the bots. It needs Python 3.10 or
 newer and torch, and the bots need neither.
 
-**Use a short path for this virtual environment on Windows.** Torch has
-deeply nested files, and a long path such as one under `AppData\Local\Temp`
-fails with `WinError 206: The filename or extension is too long`.
+**Use a short path for this virtual environment on Windows.** Torch has deeply
+nested files, and a long path such as one under `AppData\Local\Temp` fails with
+`WinError 206: The filename or extension is too long`.
 
 In a first terminal:
 
@@ -50,8 +59,7 @@ LAYA_PRELOAD=1 LAYA_MODELS=typed-decisions LAYA_DEFAULT_MODEL=typed-decisions C:
 ```
 
 The first start downloads the model weights from Hugging Face into
-`~/.cache/huggingface`, which takes about 30 seconds. Leave this terminal
-running.
+`~/.cache/huggingface`, which takes about 30 seconds. Leave this terminal running.
 
 **Check it is ready** from a second terminal:
 
@@ -65,8 +73,6 @@ On startup, the server may warn that the checkpoint ships invalid temperatures
 and that confidence is uncalibrated. That is expected, and it is why Level 3
 exists.
 
-### Settings
-
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MODEL_URL` | `http://localhost:8000/v1/systemone` | Where the bots send requests |
@@ -78,8 +84,13 @@ exists.
 
 ## Level 2: Run a backtest with no API keys
 
-This uses the `example_sma` strategy, a moving-average crossover on SPY and QQQ
-using free Yahoo data. It is a harness test, not a strategy to trade.
+This uses the `example_sma` strategy, a moving-average crossover on two NSE ETFs
+(`NIFTYBEES.NS` tracks the NIFTY 50, `BANKBEES.NS` the Bank NIFTY), using free
+daily data from Yahoo. It is a harness test, not a strategy to trade.
+
+The positions are held for days, so they are delivery (CNC) trades: they pay
+delivery charges, and they are **long-only**, because Indian cash equities
+cannot be held short overnight.
 
 In a second terminal:
 
@@ -87,7 +98,7 @@ In a second terminal:
 python -m venv C:/tdv
 ```
 ```bash
-C:/tdv/Scripts/python -m pip install pandas numpy scipy yfinance
+C:/tdv/Scripts/python -m pip install -r deploy/requirements.txt
 ```
 ```bash
 C:/tdv/Scripts/python example_sma/run_backtest.py --arms rules gated laya --split 2022-01-01
@@ -95,33 +106,24 @@ C:/tdv/Scripts/python example_sma/run_backtest.py --arms rules gated laya --spli
 
 **Expected output:**
 
-- `=== signals ===` shows about 110 crossovers across SPY and QQQ.
+- `=== data ===` shows about 2,900 daily bars for each ETF.
+- `=== signals ===` shows about 110 crossovers in total.
 - A line like
-  `[laya] prefetch done: 110 decisions in 2.1 min (0.9/s), 0 errors, 0 truncated`.
-- Three result rows (`rules`, `gated`, `laya`), each with `train` and `test`
-  halves.
+  `[laya] prefetch done: 112 decisions in 2.1 min (0.9/s), 0 errors, 0 truncated`.
+- Result rows for `rules` and `gated`, each with `train` and `test` halves.
+- At the default threshold of 0.55, `laya` shows
+  `no trades (every candidate was vetoed)`. That is expected: before
+  calibration, Laya's probabilities sit around 0.3 to 0.4 for every option.
 
 **What to check:**
 
 - `0 errors`. Otherwise the server isn't reachable at `MODEL_URL`.
-- `0 truncated`. Otherwise candidate descriptions are longer than the model
-  can read, so it decides on less than the gates see. Shorten the strategy's
-  `context_lines`, or set `MODEL_MAX_LEN`.
-- At the default threshold the `laya` row takes almost every trade. That is
-  expected before calibration: zero-shot, the model's probabilities sit around
-  0.3 to 0.4 for every option.
+- `0 truncated`. Otherwise candidate descriptions are longer than the model can
+  read.
 
-**Speed:** on CPU, expect about 6 seconds per decision on its own, or about
-1 second each when batched. Backtests batch automatically.
-
-**Output files** go in `example_sma/out/`:
-
-- `decisions_laya.jsonl` holds every question and answer, including
-  `raw_probabilities`.
-- `trades_<arm>.csv` holds each arm's trades.
-- `summary.json` holds the headline numbers.
-
-Model answers are cached in `core/cache/laya_cache.jsonl`.
+**Output files** go in `example_sma/out/`: `decisions_laya.jsonl` (every
+question and answer), `trades_<arm>.csv` and `summary.json`. Model answers are
+cached in `core/cache/laya_cache.jsonl`.
 
 ---
 
@@ -142,81 +144,90 @@ C:/tdv/Scripts/python core/calibrate.py --decisions example_sma/out/decisions_la
 **Read these lines in order:**
 
 1. **`spearman(p_side, R) = ...`** shows whether the model's probability ranks
-   trades at all. If it is zero or negative, stop here: no threshold will help.
+   trades at all. If it is near zero or negative, stop here: no threshold will
+   help.
 2. **`fitted temperature T = ...`** is the adjustment to the model's
-   probabilities. If it reports `T hit the edge of the grid`, the probabilities
-   barely relate to outcomes.
-3. **The reliability tables** show whether, after tempering, win rates rise
-   with the model's probability.
-4. **The threshold sweep** shows how many trades each threshold keeps, and
-   their mean R and t-stat. Pick a threshold here.
+   probabilities.
+3. **The reliability tables** show whether win rates rise with the model's
+   probability.
+4. **The threshold sweep** shows how many trades each threshold keeps, and their
+   mean R and t-stat. Pick a threshold here.
 
-A run from when this was set up, for reference:
+On this NSE example, when this branch was set up, the result was:
 
 ```
-spearman(p_side, R) = +0.362  (t = +3.01, n = 62): ranks trades in-sample; ...
-fitted temperature T = 0.561  (sharpens the model)
+spearman(p_side, R) = +0.028  (t = +0.15, n = 31): indistinguishable from no ranking at this sample size
 ```
+
+So on this toy strategy Laya does not rank NSE trades, and the honest conclusion
+is that the model adds nothing here. Some decisions are dropped from the fit
+because the rules arm cannot take short-side crossovers on NSE.
 
 ### 3b. Read the out-of-sample half once
 
-Use the T from 3a and the threshold you chose:
+Only if 3a showed real ranking, use its T and your chosen threshold:
 
 ```bash
-C:/tdv/Scripts/python example_sma/run_backtest.py --arms rules gated laya --split 2022-01-01 --model-temperature 0.561 --model-threshold 0.45
+C:/tdv/Scripts/python example_sma/run_backtest.py --arms rules gated laya --split 2022-01-01 --model-temperature <T> --model-threshold <threshold>
 ```
 
-Compare the `test` row of `laya` against `gated`, not against `rules`. Beating
-`rules` only shows that filtering helps. Beating `gated` shows the model is
-better than three hand-written if-statements.
-
-That reference run gave these `test` results:
-
-| Arm | Trades | R per trade |
-| --- | --- | --- |
-| rules | 42 | +0.034 |
-| gated | 13 | +0.014 |
-| laya | 18 | +0.391 |
-
-That is 18 trades on a toy strategy: encouraging, not evidence.
+Compare the `test` row of `laya` against `gated`, not against `rules`.
 
 ### 3c. Check that results are reproducible
 
-Stop the Laya server (Ctrl+C in its terminal), then:
-
-```bash
-C:/tdv/Scripts/python example_sma/run_backtest.py --arms laya --split 2022-01-01 --model-temperature 0.561 --model-threshold 0.45 --model-offline
-```
-
-**Expected:** the same trades as 3b, answered entirely from the cache. Yahoo
-re-adjusts historical prices between downloads, so stop prices can differ in
-the 4th decimal. The trades taken, their sides and the model probabilities
-should not differ.
+Stop the Laya server (Ctrl+C in its terminal), then rerun 3b with
+`--model-offline`. The trades taken, their sides and the model probabilities
+should be identical, answered entirely from the cache. Yahoo re-adjusts
+historical prices between downloads, so prices can differ in the 4th decimal.
 
 ---
 
-## Level 4: The ORB strategy and the full stack
+## Level 4: Angel One data and the ORB strategy
 
-### 4a. ORB backtest
+ORB trades 5-minute breakouts on 8 NIFTY 50 stocks. Its data comes from Angel
+One's SmartAPI, which is free with an Angel One account.
 
-ORB uses Alpaca's free market data, so it needs a free Alpaca paper-trading
-key.
+### 4a. Get SmartAPI credentials
 
-1. Create `.env` in the template folder from `deploy/.env.example`, and fill in
-   `ALPACA_PAPER_KEY` and `ALPACA_PAPER_SECRET`. Never commit `.env`; it is in
-   `.gitignore`.
-2. Install the Alpaca client and run the backtest, with the Laya server
-   running again:
+1. Open an Angel One account if you don't have one.
+2. At [smartapi.angelone.in](https://smartapi.angelone.in), sign in, go to
+   **My Apps** and create an app. Choose a Trading APIs app if you may ever
+   trade for real (Level 7). Copy its **API key**.
+3. At [smartapi.angelone.in/enable-totp](https://smartapi.angelone.in/enable-totp),
+   enable TOTP. Copy the **text secret** shown under the QR code. It is a long
+   string, not the 6-digit code.
+4. Create `.env` in the template folder (copy the Angel section of
+   `deploy/.env.example`) and fill in:
+
+| Variable | What it is |
+| --- | --- |
+| `ANGEL_API_KEY` | the app's API key |
+| `ANGEL_CLIENT_CODE` | your Angel One client ID |
+| `ANGEL_MPIN` | your 4-digit MPIN. SmartAPI logs in with the MPIN, not your password |
+| `ANGEL_TOTP_SECRET` | the TOTP text secret |
+
+Never commit `.env`; it is in `.gitignore`. The code never prints these values,
+and it turns off the SDK's own log file, which would otherwise record the
+session token on a network error.
+
+### 4b. Smoke-test the data
 
 ```bash
-C:/tdv/Scripts/python -m pip install alpaca-py
+C:/tdv/Scripts/python core/data.py
 ```
+
+**Expected:** RELIANCE and SBIN 5-minute bars for January to February 2024,
+timestamps in `+05:30`, and the line `bars/day check: 75.0`. A login failure
+prints the broker's message: check the four values, and that your system clock
+is right (TOTP codes are time-based).
+
+### 4c. Backtest, calibrate, then read the test half once
+
+With the Laya server running:
+
 ```bash
 C:/tdv/Scripts/python orb/run_backtest.py --arms rules gated laya --start 2023-01-01 --end 2026-09-01
 ```
-
-3. Calibrate on the in-sample half, then read the test half once:
-
 ```bash
 C:/tdv/Scripts/python core/calibrate.py --decisions orb/out/decisions_laya.jsonl --trades orb/out/trades_rules.csv --before 2025-03-01 --tolerance 1D
 ```
@@ -224,36 +235,76 @@ C:/tdv/Scripts/python core/calibrate.py --decisions orb/out/decisions_laya.jsonl
 C:/tdv/Scripts/python orb/run_backtest.py --arms rules gated laya --start 2025-03-01 --end 2026-09-01 --model-temperature <T> --model-threshold <threshold>
 ```
 
-Useful flags:
+The first run downloads about 3.5 years of 5-minute bars for 8 stocks, in pages
+of 90 days, paced under SmartAPI's limit of 3 requests a second. Expect several
+minutes; bars are cached in `core/cache/`, so later runs are fast. Costs are NSE
+intraday charges: Angel brokerage of ₹20 or 0.1% per order, plus STT, exchange
+and SEBI fees, stamp duty and GST (`core/market.py`).
 
 | Flag | Default | Use |
 | --- | --- | --- |
+| `--equity` | 100000 | Starting capital in rupees |
+| `--slippage-bps` | 2.0 | Adverse slippage per side |
 | `--max-model-calls` | 20000 | Refuses runs with more candidates than this |
-| `--prefetch-batch` | 16 | Candidates per batch request (max 64) |
-| `--prefetch-workers` | 1 | Parallel requests; more doesn't help a single CPU server |
-| `--model-fallback` | `wait` | What to do if the model can't answer: `wait` or `rule` |
-| `--arms ... jev` | | Runs hosted TypeSafe Jev as well, if `TYPESAFE_API_KEY` is set |
+| `--prefetch-batch` | 16 | Candidates per Laya batch request (max 64) |
 
-A multi-year ORB run can have thousands of candidates, which takes hours on
-CPU. Narrow the date range or symbols for a first run.
+---
 
-### 4b. Live paper trading, dry run
+## Level 5: The live bot, simulated fills
 
-`--dry-run` places no orders:
+The live bot reads live NSE prices from Angel One and books fills locally, with
+the backtest's own rules. No order ever reaches a broker in this mode.
+
+### 5a. Replay a past session (any time, no market needed)
+
+```bash
+C:/tdv/Scripts/python orb/live.py --replay 2026-10-06 --decider rules
+```
+
+This walks one past session through the live code path, bar by bar, with a fresh
+simulator. Trades go to `orb/out/replay_sim_trades.jsonl`. They should match the
+backtest's trades for that day; if they don't, one of the two has a bug.
+
+### 5b. One live cycle (market hours, 09:15-15:30 IST)
 
 ```bash
 C:/tdv/Scripts/python orb/live.py --once --dry-run --decider laya --model-threshold <threshold> --model-temperature <T>
 ```
 
-Decisions are written to `orb/out/live_laya_stream.jsonl`.
+**Expected:** a `cycle:` line with equity in ₹ and `[sim]`, then one line per
+breakout candidate. `--dry-run` logs what the simulator would fill without
+booking it.
 
-### 4c. Full stack in Docker
+### 5c. Run it for a session
 
-This starts the Laya service, the bots, the dashboard and the keepalive. The
-Laya service has no public port: only the bots can reach it.
+```bash
+C:/tdv/Scripts/python orb/live.py --decider laya --model-threshold <threshold> --model-temperature <T>
+```
 
-1. Create `deploy/.env` from `deploy/.env.example`, and set the Alpaca keys,
-   plus `ORB_MODEL_THRESHOLD` and `ORB_MODEL_TEMPERATURE` from your
+It sleeps until 09:15 IST, skips NSE holidays, trades until 11:30, and flattens
+at 15:05.
+
+| File in `orb/out/` | What it holds |
+| --- | --- |
+| `sim_state.json` | simulated cash and open positions. Survives restarts |
+| `sim_trades.jsonl` | every closed simulated trade, in the backtest's schema |
+| `live_decisions.jsonl` | every candidate and what was decided |
+| `live_laya_stream.jsonl` | every question and answer from Laya |
+| `STOP` | create this file to stop new entries |
+
+| Flag | Default | Use |
+| --- | --- | --- |
+| `--sim-equity` | 100000 | Simulator starting capital in rupees |
+| `--slippage-bps` | 2.0 | Adverse slippage per simulated fill |
+| `--daily-loss-pct` | 2.0 | Flatten and stand down after this loss in a day |
+| `--flat-at-minute` | 350 | 15:05 IST, before Angel's 15:15 square-off |
+
+---
+
+## Level 6: Docker
+
+1. Create `deploy/.env` from `deploy/.env.example`. Set the four `ANGEL_*`
+   values, plus `ORB_MODEL_THRESHOLD` and `ORB_MODEL_TEMPERATURE` from your
    calibration.
 2. Build and start:
 
@@ -269,12 +320,73 @@ docker compose logs -f orb
 
 **Expected:**
 
-- `laya` turns `healthy` once its weights download.
-- `orb` waits for it, then logs `decider=laya`.
-- The dashboard at http://localhost:8080 shows the ORB card tagged
-  "laya gates trades".
+- four services: `laya`, `orb`, `dashboard`, `keepalive`.
+- `laya` turns `healthy` once its weights download, then `orb` starts.
+- `orb` logs `cycle:` lines with `[sim]` during market hours, and
+  `market closed. next open ... IST` outside them.
+- The dashboard at http://localhost:8080 shows amounts in ₹ and the ORB card
+  tagged as simulated.
 
-Stop everything with `docker compose down`.
+Stop with `docker compose down`. Simulator state lives in the `orb-out` volume
+and survives restarts.
+
+---
+
+## Level 7: Real money (optional, at your own risk)
+
+Only do this after Levels 4 to 6 look right and you have read
+`skills/trading-desk-paper/SKILL.md`. Real orders lose real money, and nothing
+here is financial advice.
+
+### 7a. Exchange requirements
+
+- **Static IP.** Since April 2026, NSE/SEBI rules accept API orders only from the
+  static IP registered on your SmartAPI app. Register it on the app (up to 5
+  IPs; changes allowed once a week). On Oracle, reserve a public IP for the VM.
+- **Limit orders only.** API market and IOC orders are not allowed. The bot uses
+  marketable LIMIT entries and exits, and refuses anything else.
+
+### 7b. See the exact orders without sending them
+
+```bash
+ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES C:/tdv/Scripts/python orb/live.py --once --real-money --dry-run
+```
+
+It prints your account margin and the caps, waits 10 seconds, then logs the
+exact SmartAPI order for any approved candidate as `DRY RUN would send to Angel
+One: {...}`.
+
+### 7c. Confirm the bracket's units with one share
+
+SmartAPI doesn't document whether a ROBO bracket's `squareoff` and `stoploss`
+are rupee distances from the entry or absolute prices. The bot sends distances
+(`--robo-units points`). Before trusting it, place one 1-share ROBO order on a
+cheap, liquid stock with those parameters, through the API from your static IP.
+Then check in the Angel app that the target and stop legs sit where you
+intended, and cancel it. If they're wrong, use `--robo-units price`.
+
+### 7d. Go live
+
+```bash
+ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES C:/tdv/Scripts/python orb/live.py --real-money --max-order-value 20000 --max-orders-per-day 3
+```
+
+| Safeguard | Default |
+| --- | --- |
+| Refuses to start without `--real-money` and `ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES` | always |
+| `--max-order-value` | ₹20,000 per order |
+| `--max-orders-per-day` | 3 |
+| Entry is a ROBO bracket, so the stop exists at the broker | always; a rejected bracket is skipped, never replaced by an unprotected entry |
+| Unfilled entry | cancelled after 30 s |
+| Order calls | never retried, and checked by `ordertag` against the order book first |
+| Flatten | 15:05 IST, limit exits re-priced until flat; Angel squares off at 15:15 (₹50 + GST per position) |
+| `orb/out/STOP`, daily loss limit | as in Level 5 |
+
+To close everything immediately:
+
+```bash
+ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES C:/tdv/Scripts/python orb/live.py --flatten --real-money
+```
 
 ---
 
@@ -283,20 +395,22 @@ Stop everything with `docker compose down`.
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `WinError 206 ... filename too long` during install | Venv path too deep for torch on Windows | Use a short path such as `C:/lv` |
-| `[laya] giving up after 5 tries: URLError` | Server not running or wrong URL | Start `laya-serve`; check `curl localhost:8000/health` and `MODEL_URL` |
-| `[laya] HTTP 401` | Server has `LAYA_API_KEY` set | Set the same `LAYA_API_KEY` for the backtest |
-| `[laya] WARNING: state truncated ...` | Description longer than the model's limit | Shorten `context_lines`, or set `MODEL_MAX_LEN` |
-| `laya` arm takes every trade | Uncalibrated threshold | Run Level 3 |
-| `laya` arm takes no trades | Threshold too high, or `entry_criteria` not keyed by `enter_long` / `enter_short` / `wait` | Lower the threshold; fix the strategy's criteria keys |
-| `no_answer` notes in `--model-offline` mode | Decision not in cache: the description, model name or `MODEL_MAX_LEN` changed | Run once with the server up |
-| Different results after changing `MODEL_NAME` or upgrading `laya` | It is a different model | Recalibrate; pin `LAYA_VERSION` in `deploy/.env` once settled |
+| `Angel One credentials missing: ...` | `.env` not found or incomplete | Create `.env` in the template folder with all four `ANGEL_*` values |
+| `Angel One login failed: ...` | Wrong value, or clock skew breaking TOTP | Check the values; sync your system clock |
+| `... exceeding rate limit` repeatedly | Too many requests, or SmartAPI's false positives | The client already backs off; wait a minute, or cache more |
+| `not an NSE equity in Angel's instrument master` | Symbol typo, or not an `-EQ` series stock | Use the plain NSE symbol, e.g. `RELIANCE` |
+| `[laya] giving up after 5 tries: URLError` | Laya server not running | Start `laya-serve`; check `curl localhost:8000/health` |
+| `laya` arm takes no trades | Uncalibrated threshold | Run Level 3 / 4c |
+| `market closed. next open ...` on a weekday | NSE holiday | Expected |
+| `REFUSED, ... exceeds --max-order-value` | Real-money cap working | Lower size, or raise the cap knowingly |
+| Real orders rejected for the IP | Static IP not registered on the SmartAPI app | Register the server's static IP |
 
 ---
 
 ## Cleanup
 
 ```bash
-rm -rf example_sma/out orb/out core/cache
+rm -rf example_sma/out orb/out core/cache logs
 ```
 
 To remove the two virtual environments and the downloaded model weights:
