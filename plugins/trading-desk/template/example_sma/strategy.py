@@ -9,11 +9,11 @@ harness report an honest "no edge" before you trust it to report a yes.
 Replace this file with your own logic. The contract the rest of the harness
 needs from a strategy object is small:
 
-  feature_cols                 the columns Jev and the gates may read
+  feature_cols                 the columns the model and the gates may read
   prepare(df)   -> DataFrame   add indicators and a `signal` column
   snapshot(...)  -> Snapshot   describe one candidate in words and numbers
   gates()       -> [Gate]      hand-written filters: the control arm
-  jev_prompt()  -> JevPrompt   what to ask the model
+  model_prompt() -> ModelPrompt  what to ask the model (Laya)
 
 `prepare` must produce these columns, because the engine reads them directly:
 
@@ -35,7 +35,7 @@ import numpy as np
 import pandas as pd
 
 from contracts import Action, Snapshot
-from decision import Gate, JevPrompt
+from decision import Gate, ModelPrompt
 
 FEATURE_COLS = [
     "fast_slope_atr",     # slope of the fast average over 5 bars, in ATRs
@@ -189,10 +189,10 @@ class SMACrossover:
 
         return [trend_gate, slope_gate, extension_gate, vol_gate]
 
-    # --------------------------------------------------------------- jev prompt
+    # --------------------------------------------------------------- model prompt
 
-    def jev_prompt(self) -> JevPrompt:
-        return JevPrompt(
+    def model_prompt(self) -> ModelPrompt:
+        return ModelPrompt(
             entry_instructions=(
                 "A moving-average crossover has just triggered on a daily chart. "
                 "The strategy has already decided the direction; you are only "
@@ -202,9 +202,15 @@ class SMACrossover:
                 "and the averages are separating, stand aside when it looks like "
                 "chop or price has already run too far from the slow average."
             ),
+            # Keys must be Action values: the decider reads the probability of
+            # the proposed side by name, so any other key vetoes every trade.
             entry_criteria={
-                "take_it": "this crossover is worth trading",
-                "stand_aside": "this looks like chop or a late entry",
+                Action.ENTER_LONG.value:
+                    "this upward crossover is worth trading: buy now",
+                Action.ENTER_SHORT.value:
+                    "this downward crossover is worth trading: sell short now",
+                Action.WAIT.value:
+                    "this looks like chop or a late entry: take no position",
             },
             # Recorded, never acted on. Costs nothing extra and lets you check
             # afterwards whether a stated risk actually predicted the outcome.

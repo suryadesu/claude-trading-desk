@@ -12,9 +12,11 @@ it never influenced. A config only counts as evidence if it works in both. The
   python3 sweep.py --symbols SPY QQQ IWM AAPL MSFT NVDA TSLA AMD \
                    --start 2023-01-01 --split 2025-03-01 --end 2026-09-01
 
-Jev is deliberately not in this sweep. Searching a grid with a paid model would
-cost thousands of calls to answer a question free arms can answer: does any
-configuration of this strategy have an edge before costs at all?
+The model arm is deliberately not in this sweep. Searching a grid through a
+model costs thousands of calls (and, on a CPU sidecar, hours) to answer a
+question the free arms can answer: does any configuration of this strategy have
+an edge before costs at all? Scoring a grid with the model is also the fastest
+way to fit its threshold to noise.
 """
 
 from __future__ import annotations

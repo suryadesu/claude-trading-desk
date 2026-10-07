@@ -26,7 +26,7 @@ Then, in the directory you want the workspace:
 | --- | --- |
 | `trading-desk-method` | The testing discipline, and ten named bugs that each made results look better than they were |
 | `trading-desk-strategy` | The strategy contract, and the causality rules that keep a backtest honest |
-| `trading-desk-jev` | Wiring a decision model as a filter, and how to tell whether it added anything |
+| `trading-desk-laya` | Wiring the open-source Laya decision model as a filter, calibrating it, and how to tell whether it added anything |
 | `trading-desk-paper` | Going live on Alpaca paper: replay validation, kill switches, free-data sharp edges |
 | `trading-desk-dashboard` | The live desk, server-sent events, animated backtest curves |
 | `trading-desk-oracle` | Free 24/7 hosting, capacity retries, and the two firewalls that catch everyone |
@@ -50,7 +50,7 @@ Every strategy runs three ways over an identical candidate set:
 | --- | --- |
 | `rules` | Take every signal. The strategy as advertised. |
 | `gated` | Hand-written if-statements filter the signals. **The control.** |
-| `jev` | A decision model filters the same signals. |
+| `laya` | A decision model ([Laya](https://huggingface.co/convaiinnovations/laya), open source, self-hosted) filters the same signals. |
 
 The control arm is the one people skip, and skipping it is what makes "AI improved
 my strategy" impossible to disprove. If the hand-written gates match the model,
@@ -69,6 +69,10 @@ python3 example_sma/run_backtest.py
 # the worked example: opening range breakout on 8 stocks (needs a free Alpaca key)
 python3 orb/run_backtest.py --arms rules gated
 
+# add the model arm: Laya, open source, served locally (Python >= 3.10, own venv is fine)
+pip install "laya[serve]" && laya-serve          # http://localhost:8000/v1/systemone
+python3 orb/run_backtest.py --arms rules gated laya
+
 # the live desk
 python3 dashboard/server.py            # http://localhost:8080
 ```
@@ -84,7 +88,7 @@ pipeline, not an edge, and the harness will tell you so.
 | Oracle Cloud Always Free VM (2 ARM cores, 12 GB) | free forever | $0 |
 | SEC EDGAR filings | public | $0 |
 | Yahoo data via yfinance | free | $0 |
-| TypeSafe Jev decisions | pay per token, input only | cents per backtest, ~$1 to $2 a month live |
+| Laya decision model (Apache-2.0, runs on the same VM) | open source | $0 |
 
 ## Layout
 

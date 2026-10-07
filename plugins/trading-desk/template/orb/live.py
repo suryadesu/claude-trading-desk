@@ -4,7 +4,7 @@ live.py
 =======
 Runs the validated ORB strategy against Alpaca paper trading.
 
-It imports `ORBStrategy` and `JevDecider` directly from the backtest. Nothing is
+It imports `ORBStrategy` and `ModelDecider` directly from the backtest. Nothing is
 reimplemented here, because a second copy of the logic drifts from the one you
 measured and then your backtest no longer describes what is running.
 
@@ -50,7 +50,7 @@ from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce   # noqa: E4
 
 from contracts import Action, ENTRIES                                # noqa: E402
 from data import fetch_universe                                      # noqa: E402
-from decision import JevDecider, RuleDecider                         # noqa: E402
+from decision import ModelDecider, RuleDecider                       # noqa: E402
 from strategy import ORBConfig, ORBStrategy                          # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "out"
@@ -186,10 +186,11 @@ class LiveRunner:
         self.decisions = OUT / "live_decisions.jsonl"
         self.fills = OUT / "live_fills.jsonl"
 
-        if args.decider == "jev":
-            self.decider = JevDecider(
-                prompt=self.strat.jev_prompt(), threshold=args.jev_threshold,
-                log_path=OUT / "live_jev_stream.jsonl",
+        if args.decider in ("laya", "jev"):
+            self.decider = ModelDecider(
+                prompt=self.strat.model_prompt(), name=args.decider,
+                threshold=args.model_threshold, temperature=args.model_temperature,
+                log_path=OUT / f"live_{args.decider}_stream.jsonl",
             )
         else:
             self.decider = RuleDecider()
@@ -400,9 +401,15 @@ def parse_args():
     p = argparse.ArgumentParser(description="Paper-trade the ORB strategy on Alpaca.")
     p.add_argument("--symbols", nargs="+",
                    default=["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA", "AMD"])
-    p.add_argument("--decider", default="jev", choices=["jev", "rules"])
-    p.add_argument("--jev-threshold", type=float, default=0.30,
-                   help="0.30 is what the shadow calibration supported, not 0.55")
+    p.add_argument("--decider", default="laya", choices=["laya", "jev", "rules"],
+                   help="laya: the local laya-serve sidecar at MODEL_URL. jev: the same "
+                        "client pointed at hosted Jev (set MODEL_URL/MODEL_NAME/MODEL_API_KEY)")
+    p.add_argument("--model-threshold", "--jev-threshold", dest="model_threshold",
+                   type=float, default=0.30,
+                   help="0.30 is what Jev's shadow calibration supported. It does not carry "
+                        "over to Laya: refit it with core/calibrate.py on in-sample decisions")
+    p.add_argument("--model-temperature", type=float, default=1.0,
+                   help="temperature fitted by core/calibrate.py; 1.0 = raw model output")
     p.add_argument("--or-minutes", type=int, default=15)
     p.add_argument("--exec-minutes", type=int, default=5)
     p.add_argument("--rr", type=float, default=2.0)

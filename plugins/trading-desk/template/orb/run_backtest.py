@@ -6,7 +6,7 @@ Runs the ORB strategy through up to three decision layers over the same data
 and prints them side by side.
 
   python3 run_backtest.py --symbols SPY QQQ --start 2024-01-01 --arms rules gated
-  python3 run_backtest.py --arms rules gated jev --max-jev-calls 500
+  python3 run_backtest.py --arms rules gated laya --max-model-calls 5000
 
 The candidate set is identical across arms by construction: the strategy finds
 the breakouts, and the arms only differ in which ones they agree to take.
@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import metrics as M                                    # noqa: E402
 from data import DEFAULT_UNIVERSE, fetch_universe      # noqa: E402
-from decision import GateDecider, JevDecider, RuleDecider  # noqa: E402
+from decision import GateDecider, ModelDecider, RuleDecider  # noqa: E402
 from engine import Engine, EngineConfig                # noqa: E402
 from strategy import ORBConfig, ORBStrategy            # noqa: E402
 
@@ -54,7 +54,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--start", default="2023-01-01")
     p.add_argument("--end", default=None)
     p.add_argument("--arms", nargs="+", default=["rules", "gated"],
-                   choices=["rules", "gated", "jev"])
+                   choices=["rules", "gated", "laya", "jev"],
+                   help="laya needs laya-serve running at MODEL_URL (free, local). "
+                        "jev is the same client pointed at hosted Jev")
 
     g = p.add_argument_group("strategy")
     g.add_argument("--or-minutes", type=int, default=15)
@@ -83,15 +85,27 @@ def parse_args() -> argparse.Namespace:
                    help="extra calendar days fetched before --start so the 200 EMA "
                         "and long ATR are warm on the first tradable session")
 
-    j = p.add_argument_group("jev")
-    j.add_argument("--jev-threshold", type=float, default=0.55)
-    j.add_argument("--jev-offline", action="store_true", help="use cached decisions only")
-    j.add_argument("--max-jev-calls", type=int, default=2000,
-                   help="abort before running up an unexpected bill")
-    j.add_argument("--jev-fallback", default="wait", choices=["wait", "rule"])
-    j.add_argument("--prefetch-workers", type=int, default=5,
-                   help="concurrent Jev calls. 0 disables prefetch (sequential). "
-                        "Rate limit is 1,200/min, so ~5 workers is the ceiling.")
+    j = p.add_argument_group("model (laya / jev)")
+    j.add_argument("--model-threshold", "--jev-threshold", dest="model_threshold",
+                   type=float, default=0.55,
+                   help="minimum probability on the proposed side. Refit it for Laya "
+                        "with core/calibrate.py on the in-sample half only")
+    j.add_argument("--model-temperature", type=float, default=1.0,
+                   help="temperature fitted by core/calibrate.py; 1.0 = raw model output")
+    j.add_argument("--model-offline", "--jev-offline", dest="model_offline",
+                   action="store_true", help="use cached decisions only")
+    j.add_argument("--max-model-calls", "--max-jev-calls", dest="max_model_calls",
+                   type=int, default=20000,
+                   help="refuse runs larger than this. Laya is free, but a CPU sidecar "
+                        "is slow; hosted Jev bills per call")
+    j.add_argument("--model-fallback", "--jev-fallback", dest="model_fallback",
+                   default="wait", choices=["wait", "rule"])
+    j.add_argument("--prefetch-workers", type=int, default=1,
+                   help="concurrent requests. 0 disables prefetch (sequential). laya-serve "
+                        "runs one forward pass at a time, so more workers do not help it")
+    j.add_argument("--prefetch-batch", type=int, default=16,
+                   help="states per /v1/systemone/batch request (max 64). 0 = one "
+                        "request per state, which hosted Jev needs")
 
     p.add_argument("--tag", default="", help="suffix for output filenames")
     return p.parse_args()
@@ -147,24 +161,27 @@ def main() -> None:
         elif arm == "gated":
             decider = GateDecider(strat.gates())
         else:
-            if n_candidates > args.max_jev_calls and not args.jev_offline:
-                print(f"[jev] {n_candidates} candidates exceeds --max-jev-calls "
-                      f"({args.max_jev_calls}). Narrow the run or raise the cap.")
+            if n_candidates > args.max_model_calls and not args.model_offline:
+                print(f"[{arm}] {n_candidates} candidates exceeds --max-model-calls "
+                      f"({args.max_model_calls}). Narrow the run or raise the cap.")
                 continue
-            decider = JevDecider(
-                prompt=strat.jev_prompt(), threshold=args.jev_threshold,
-                offline=args.jev_offline, fallback=args.jev_fallback,
-                log_path=OUT / f"decisions_jev{'_' + args.tag if args.tag else ''}.jsonl",
+            decider = ModelDecider(
+                prompt=strat.model_prompt(), name=arm,
+                threshold=args.model_threshold, temperature=args.model_temperature,
+                offline=args.model_offline, fallback=args.model_fallback,
+                log_path=OUT / f"decisions_{arm}{'_' + args.tag if args.tag else ''}.jsonl",
             )
 
         print(f"=== arm: {arm} ===")
-        if arm == "jev" and args.prefetch_workers > 0 and not args.jev_offline:
+        if (isinstance(decider, ModelDecider) and args.prefetch_workers > 0
+                and not args.model_offline):
             snaps = []
             for sym, plan in plans.items():
                 sig = plan[plan["signal"] != ""]
                 for ts, row in sig.iterrows():
                     snaps.append(strat.snapshot(sym, ts, row))
-            decider.prefetch(snaps, workers=args.prefetch_workers)
+            decider.prefetch(snaps, workers=args.prefetch_workers,
+                             batch_size=args.prefetch_batch)
 
         engine = Engine(ecfg)
         engine.set_feature_cols(strat.feature_cols)

@@ -9,7 +9,7 @@ have not said.
 2. Create `<name>/` at the workspace root, next to `core/`, never nested deeper:
    strategies resolve `core/` as `../core`.
 3. Write `<name>/strategy.py` with `feature_cols`, `prepare`, `snapshot`,
-   `gates` and `jev_prompt`. Copy `orb/strategy.py` as the model.
+   `gates` and `model_prompt`. Copy `orb/strategy.py` as the model.
 4. Write `<name>/run_backtest.py` running the `rules` and `gated` arms. Do not
    add the model arm yet.
 5. Beside every indicator, state in a comment why it is causal at that bar.

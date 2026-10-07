@@ -106,7 +106,7 @@ add the ingress rule in the console:
 ```bash
 cd ~/trading-strategies/deploy
 cp .env.example .env
-nano .env          # three Alpaca key pairs, plus TYPESAFE_API_KEY
+nano .env          # three Alpaca key pairs. Laya, the decision model, needs no key
 docker compose --env-file .env up -d --build
 docker compose ps
 docker compose logs -f orb
@@ -188,10 +188,10 @@ docker compose exec orb python3 /app/orb_breakout/live.py --flatten
 |---|---|
 | Oracle Always Free instance | $0 |
 | Three Alpaca paper accounts | $0 |
-| Jev decisions, all three bots | roughly $1.50 a month |
+| Laya decisions (self-hosted on the same VM) | $0 |
 | Public dashboard on Cloudflare | $0 within the free tier |
 
-Under two dollars a month to run three strategies around the clock with a public
+Nothing a month to run three strategies around the clock with a public
 leaderboard. The expensive part remains your attention, not the infrastructure.
 
 Paper results are hypothetical. Nothing here is financial advice.

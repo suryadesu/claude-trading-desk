@@ -19,5 +19,8 @@ Set up a trading workspace for the user in the current directory.
    - `python3 example_sma/run_backtest.py` needs no API key at all
    - `python3 orb/run_backtest.py --arms rules gated` needs Alpaca (free)
    - `python3 dashboard/server.py` opens the desk
+   - the `laya` arm needs the free Laya model running locally:
+     `pip install "laya[serve]" && laya-serve` (Python >= 3.10, its own venv is
+     fine), then `--arms rules gated laya`. Read `trading-desk-laya` first.
 
 Read the `trading-desk-method` skill before reporting any backtest result.

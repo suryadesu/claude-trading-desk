@@ -82,9 +82,10 @@ _remote_lock = threading.Lock()
 # Anything found on disk that is not in this list is appended at runtime, so the
 # board is never capped at four.
 #
-#   jev_mode  gating  = the Jev model decides whether the trade is taken
-#             monitor = Jev is scored and recorded but does NOT gate anything
-#             none    = no Jev in the loop
+#   model_mode  gating  = the decision model (Laya) decides whether the trade is taken
+#               monitor = the model is scored and recorded but does NOT gate anything
+#               none    = no model in the loop
+#   model       the model's name for the card, e.g. "laya". (`jev_mode` is still read.)
 #   fills     broker    = a broker confirmed the fill (paper or live)
 #             simulated = the bot filled itself against its own data feed
 # The roster is declared, not discovered, so a bot that has never run still gets
@@ -93,8 +94,9 @@ _remote_lock = threading.Lock()
 #
 # fills:    "broker" if a broker reports the fills, "simulated" if the bot books
 #           its own. Say so on the card. Simulated fills are not results.
-# jev_mode: "gating" if the model can veto a trade, "monitor" if its score is
-#           only recorded, "none" if the strategy does not consult it.
+# model_mode: "gating" if the model can veto a trade, "monitor" if its score is
+#             only recorded, "none" if the strategy does not consult it.
+#             Older rosters say `jev_mode`; it is read as the same thing.
 SERIES = ["#e0595f", "#4a9eca", "#d4a13c", "#2f855a", "#7b61c4", "#15161a"]
 
 BOTS_FILE = Path(os.environ.get("DASHBOARD_BOTS", HERE / "bots.json"))
@@ -106,7 +108,8 @@ DEFAULT_BOTS: List[Dict[str, Any]] = [
         "label": "Example strategy",
         "strategy": "Replace this in dashboard/bots.json with your own.",
         "broker": "Alpaca paper",
-        "jev_mode": "none",
+        "model_mode": "none",
+        "model": "",
         "fills": "broker",
         "accent": "#4a9eca",
     },
@@ -140,7 +143,8 @@ def load_bots() -> List[Dict[str, Any]]:
             "label": str(b.get("label", b["key"])),
             "strategy": str(b.get("strategy", "")),
             "broker": str(b.get("broker", "paper")),
-            "jev_mode": str(b.get("jev_mode", "none")),
+            "model_mode": str(b.get("model_mode", b.get("jev_mode", "none"))),
+            "model": str(b.get("model", "jev" if "jev_mode" in b else "")),
             "fills": str(b.get("fills", "broker")),
             "accent": str(b.get("accent", SERIES[i % len(SERIES)])),
         })
@@ -340,7 +344,8 @@ def _blank_record(key: str, index: int, message: str = "") -> dict:
         "strategy": meta.get("strategy") or "", "strategy_live": "",
         "broker": meta.get("broker") or "unknown",
         "fills": meta.get("fills") or "broker",
-        "jev_mode": meta.get("jev_mode", "none"),
+        "model_mode": meta.get("model_mode", "none"),
+        "model": meta.get("model", ""),
         "accent": accent_for(key, index), "expected": key in BOT_META,
         "present": False, "status": "absent", "raw_status": "",
         "stale": False, "updated_at": "", "age_s": None,

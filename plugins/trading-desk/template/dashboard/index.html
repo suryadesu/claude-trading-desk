@@ -168,7 +168,7 @@ function renderCards(s){
     `${(s.totals||{}).bots_running ?? 0} of ${s.bots.length} running · updated ${clockOf(s.generated_at)}`;
 
   const sims = s.bots.filter(b => b.fills === "simulated").map(b => b.label);
-  const mon  = s.bots.filter(b => b.jev_mode === "monitor").map(b => b.label);
+  const mon  = s.bots.filter(b => b.model_mode === "monitor").map(b => b.label);
   const off  = s.bots.filter(b => b.status !== "running").map(b => b.label);
   let parts = [];
   if (off.length)  parts.push(`<b>${esc(off.join(", "))}</b> ${off.length>1?"have":"has"} not reported yet, so ${off.length>1?"those cards":"that card"} ${off.length>1?"are":"is"} showing the <b>backtest</b> that earned ${off.length>1?"them":"it"} a place here. Live numbers replace it on the first cycle after the open.`);
@@ -184,8 +184,8 @@ function cardHTML(b, r, leaderCount){
   const bt = backtests[b.key];
   const tags = [
     `<span class="tag status${on?"":" off"}">${esc(b.status||"")}</span>`,
-    b.jev_mode === "gating" ? '<span class="tag gate">jev gates trades</span>' : "",
-    b.jev_mode === "monitor" ? '<span class="tag monitor">jev monitors only</span>' : "",
+    b.model_mode === "gating" ? `<span class="tag gate">${esc(b.model||"model")} gates trades</span>` : "",
+    b.model_mode === "monitor" ? `<span class="tag monitor">${esc(b.model||"model")} monitors only</span>` : "",
     b.fills === "simulated" ? '<span class="tag sim">simulated fills · T+1</span>' : "",
     (!on && bt) ? '<span class="tag bt">showing backtest</span>' : "",
   ].join("");

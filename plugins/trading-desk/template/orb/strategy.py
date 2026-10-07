@@ -42,7 +42,7 @@ import pandas as pd
 
 import features as F
 from contracts import Action, Snapshot
-from decision import JevPrompt
+from decision import ModelPrompt
 
 RTH_MINUTES = 390
 
@@ -372,7 +372,7 @@ class ORBStrategy:
         """
         The control arm: the critique video's advice, written as if-statements.
 
-        If these match Jev, the honest conclusion is that you did not need Jev
+        If these match the model, the honest conclusion is that you did not need it
         for this strategy. That result is worth filming too.
         """
         cfg_rr = self.cfg
@@ -407,10 +407,10 @@ class ORBStrategy:
 
         return [trend_gate, extension_gate, volume_gate, shape_gate, touches_gate]
 
-    # ------------------------------------------------------ jev prompt
+    # ------------------------------------------------------ model prompt
 
-    def jev_prompt(self) -> JevPrompt:
-        return JevPrompt(
+    def model_prompt(self) -> ModelPrompt:
+        return ModelPrompt(
             entry_instructions=(
                 "An opening-range-breakout system has confirmed a breakout and wants to "
                 "enter now, risking 1 unit to make {rr}. Breakouts of the opening range "
@@ -430,7 +430,7 @@ class ORBStrategy:
                     "the setup is not clean enough to risk capital on. Take no position.",
             },
             extra_questions={
-                # Recorded, never acted on. Lets us check afterwards whether Jev's
+                # Recorded, never acted on. Lets us check afterwards whether the model's
                 # stated fakeout risk actually predicted the fakeouts.
                 "fakeout_risk": {
                     "type": "score",

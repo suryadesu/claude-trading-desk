@@ -1,5 +1,5 @@
-# Four bots, a dashboard, a keepalive, one state volume. Built for Oracle Cloud
-# Always Free (Ampere A1, ARM64, 2 OCPU / 12 GB).
+# Four bots, a decision model, a dashboard, a keepalive, one state volume. Built
+# for Oracle Cloud Always Free (Ampere A1, ARM64, 2 OCPU / 12 GB).
 #
 #   docker compose --env-file .env up -d --build
 #   docker compose logs -f orb
@@ -9,6 +9,10 @@
 # Each Alpaca bot gets its own paper account so the leaderboard is real. One
 # paper account per Alpaca login, so that means three signups. The lvl bot needs
 # no broker: it reads live CME data from Databento and simulates its own fills.
+#
+# The decision model is Laya, served by the `laya` service on the internal
+# network only. It has no published port: nothing outside this compose project
+# can reach it, and it needs no API key while that stays true.
 
 x-bot: &bot
   build:
@@ -21,15 +25,46 @@ x-bot: &bot
   environment: &bot-env
     TZ: America/New_York
     BOT_STATE_DIR: /app/state
-    TYPESAFE_API_KEY: ${TYPESAFE_API_KEY}
+    MODEL_URL: http://laya:8000/v1/systemone
+    MODEL_NAME: ${MODEL_NAME:-typed-decisions}
+    LAYA_API_KEY: ${LAYA_API_KEY:-}
   logging:
     driver: json-file
     options: { max-size: "10m", max-file: "5" }
 
 services:
-  orb:                       # agent 1: opening range breakout, filtered by Jev
+  laya:                      # the decision model: Laya over /v1/systemone, CPU
+    build:
+      context: ..
+      dockerfile: deploy/laya.Dockerfile
+      args:
+        LAYA_VERSION: ${LAYA_VERSION:-}
+    container_name: laya
+    restart: unless-stopped
+    # No `ports:` on purpose. The bots reach it as http://laya:8000 inside the
+    # compose network; publishing 8000 would hand the model to the internet.
+    expose:
+      - "8000"
+    volumes:
+      - models:/models      # Hugging Face cache: weights download once, not per rebuild
+    environment:
+      LAYA_DEVICE: cpu
+      LAYA_PRELOAD: "1"
+      LAYA_MODELS: ${MODEL_NAME:-typed-decisions}
+      LAYA_DEFAULT_MODEL: ${MODEL_NAME:-typed-decisions}
+      LAYA_MAX_LOADED: "1"
+      LAYA_THREADS: "2"     # = physical cores on the A1 Always Free shape
+      LAYA_API_KEY: ${LAYA_API_KEY:-}
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  orb:                       # agent 1: opening range breakout, filtered by Laya
     <<: *bot
     container_name: orb
+    depends_on:
+      laya:
+        condition: service_healthy
     environment:
       <<: *bot-env
       BOT: orb
@@ -37,7 +72,11 @@ services:
       ALPACA_PAPER_SECRET: ${ORB_ALPACA_SECRET}
       BOT_NAME: orb
       BOT_LABEL: ORB breakout
-    command: ["--decider", "jev", "--jev-threshold", "0.30"]
+    # Threshold and temperature come from core/calibrate.py on the in-sample
+    # half. 0.30 was Jev's number; it is only a placeholder for Laya.
+    command: ["--decider", "laya",
+              "--model-threshold", "${ORB_MODEL_THRESHOLD:-0.30}",
+              "--model-temperature", "${ORB_MODEL_TEMPERATURE:-1.0}"]
 
   insider:                   # agent 3c: corporate insider purchases
     <<: *bot
@@ -107,3 +146,4 @@ services:
 volumes:
   state:
   cache:
+  models:

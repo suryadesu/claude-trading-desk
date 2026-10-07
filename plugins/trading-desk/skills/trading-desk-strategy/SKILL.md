@@ -17,7 +17,7 @@ class MyStrategy:
     def prepare(self, df) -> pd.DataFrame        # add indicators and a signal column
     def snapshot(self, sym, ts, row) -> Snapshot # describe one candidate
     def gates(self) -> list[Gate]                # hand-written filters: the control arm
-    def jev_prompt(self) -> JevPrompt            # what to ask the model
+    def model_prompt(self) -> ModelPrompt        # what to ask the model (Laya)
 ```
 
 ## The plan DataFrame

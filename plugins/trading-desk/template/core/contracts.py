@@ -6,7 +6,7 @@ The contract between a strategy, a decision layer, and the engine.
 A strategy's only job is to propose candidates and describe the situation.
 It never decides whether to trade — that belongs to a Decider — and it never
 executes — that belongs to the engine. Keeping those three apart is what lets
-us run the same strategy against rules, hand-written gates, and Jev, and know
+us run the same strategy against rules, hand-written gates, and a model, and know
 the only thing that changed was the decision layer.
 """
 
@@ -36,7 +36,7 @@ class Snapshot:
     Everything known at one bar, for one symbol, with nothing from the future.
 
     `features` are the numbers gates read. `context_lines` are the same facts in
-    plain English, which is what Jev reads. Both are built from the same row, so
+    plain English, which is what the model reads. Both are built from the same row, so
     neither decision layer gets an information advantage over the other.
     """
     symbol: str
@@ -72,7 +72,7 @@ class Decision:
     latency_ms: float = 0.0
     cached: bool = False
     note: str = ""
-    aux: Dict[str, float] = field(default_factory=dict)   # extra Jev answers, e.g. fakeout_risk
+    aux: Dict[str, float] = field(default_factory=dict)   # extra model answers, e.g. fakeout_risk
 
 
 @dataclass

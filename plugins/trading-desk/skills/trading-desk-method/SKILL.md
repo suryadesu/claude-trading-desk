@@ -20,7 +20,7 @@ Run every strategy three ways over an identical candidate set:
 | --- | --- |
 | `rules` | Take every signal. The strategy as advertised. |
 | `gated` | Hand-written if-statements filter the signals. **The control.** |
-| `jev` / model | The model filters the same signals. |
+| `laya` / model | The model filters the same signals. |
 
 The `gated` arm is the one everyone skips, and skipping it makes "the AI
 improved my strategy" unfalsifiable. Without a control you cannot separate *this

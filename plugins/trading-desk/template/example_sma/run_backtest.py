@@ -6,7 +6,7 @@ Three arms, always, and in this order:
 
   rules   take every signal the strategy produces. The strategy as advertised.
   gated   hand-written if-statements filter the same signals. The CONTROL.
-  jev     the model filters the same signals.
+  laya    the model (Laya, local and free) filters the same signals.
 
 The gated arm is the one people skip, and skipping it is what makes "AI improved
 my strategy" unfalsifiable. All three arms must see an identical candidate set,
@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT / "core"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import metrics as M                                              # noqa: E402
-from decision import GateDecider, JevDecider, RuleDecider         # noqa: E402
+from decision import GateDecider, ModelDecider, RuleDecider       # noqa: E402
 from engine import Engine, EngineConfig                           # noqa: E402
 
 from strategy import SMAConfig, SMACrossover                      # noqa: E402
@@ -51,14 +51,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--split", default=None,
                    help="train/test boundary, e.g. 2022-01-01. Report BOTH halves.")
     p.add_argument("--arms", nargs="+", default=["rules", "gated"],
-                   choices=["rules", "gated", "jev"],
-                   help="jev needs TYPESAFE_API_KEY and spends money")
+                   choices=["rules", "gated", "laya", "jev"],
+                   help="laya needs laya-serve at MODEL_URL (free, local); "
+                        "jev needs TYPESAFE_API_KEY and spends money")
     p.add_argument("--equity", type=float, default=10_000)
     p.add_argument("--risk-pct", type=float, default=0.005)
     p.add_argument("--slippage-bps", type=float, default=2.0)
     p.add_argument("--fill", default="next_open", choices=["close", "next_open", "level"])
-    p.add_argument("--jev-threshold", type=float, default=0.55)
-    p.add_argument("--jev-offline", action="store_true")
+    p.add_argument("--model-threshold", "--jev-threshold", dest="model_threshold",
+                   type=float, default=0.55)
+    p.add_argument("--model-temperature", type=float, default=1.0,
+                   help="temperature fitted by core/calibrate.py; 1.0 = raw model output")
+    p.add_argument("--model-offline", "--jev-offline", dest="model_offline",
+                   action="store_true", help="use cached decisions only")
     return p.parse_args()
 
 
@@ -147,11 +152,19 @@ def main() -> None:
         elif arm == "gated":
             decider = GateDecider(strat.gates())
         else:
-            decider = JevDecider(
-                prompt=strat.jev_prompt(), threshold=args.jev_threshold,
-                offline=args.jev_offline,
-                log_path=OUT / "decisions_jev.jsonl",
+            decider = ModelDecider(
+                prompt=strat.model_prompt(), name=arm,
+                threshold=args.model_threshold, temperature=args.model_temperature,
+                offline=args.model_offline,
+                log_path=OUT / ("decisions_%s.jsonl" % arm),
             )
+            if not args.model_offline:
+                # Each crossover is asked about from a flat position, so the
+                # questions are independent and can be batched up front.
+                snaps = [strat.snapshot(sym, ts, row)
+                         for sym, plan in plans.items()
+                         for ts, row in plan[plan["signal"] != ""].iterrows()]
+                decider.prefetch(snaps)
         engine = Engine(ecfg)
         engine.set_feature_cols(strat.feature_cols)
         res = engine.run(plans, strat, decider, verbose=False)
@@ -187,7 +200,7 @@ def main() -> None:
     print("wrote %s" % OUT)
 
     print("\nRead this before believing any of it:")
-    print("  - is the gated arm as good as jev? then you did not need jev.")
+    print("  - is the gated arm as good as the model? then you did not need the model.")
     print("  - is the test half as good as the train half? if not, it is fitted.")
     print("  - a t-stat under 2 on R/trade is not evidence of an edge.")
 
