@@ -1,8 +1,8 @@
 ---
 name: trading-desk-paper
-description: Take a backtested strategy live on NSE with Angel One - simulated fills by default, replay validation, kill switches, state files, real-money safeguards (ROBO brackets, limit-only API orders, static IP, 3:15 PM square-off) and the failure modes that only appear live. Use when wiring a live loop or debugging one.
+description: Take a backtested strategy live on NSE with Angel One or INDmoney - simulated fills by default, replay validation, kill switches, state files, real-money safeguards (ROBO brackets, limit-only API orders, static IP, 3:15 PM square-off) and the failure modes that only appear live. Use when wiring a live loop or debugging one.
 version: 2.0.0
-tags: [trading, nse, angel-one, smartapi, paper-trading, live]
+tags: [trading, nse, angel-one, smartapi, indmoney, indstocks, paper-trading, live]
 allowed-tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 
@@ -119,6 +119,25 @@ How positions stay protected:
   the previous exit before re-pricing so two exits can never both fill. Angel
   squares off open intraday positions itself at 15:15 and charges Rs 50 + GST
   per position for it.
+
+## INDmoney instead of Angel One
+
+`--broker indmoney` (or `BROKER=indmoney`) switches data, brokerage and the
+real-money broker to INDmoney's INDstocks API (`core/indstocks.py`,
+`IndBroker`). What differs:
+
+- **Consent** is `INDSTOCKS_REAL_MONEY=I_ACCEPT_REAL_LOSSES`. Angel's variable
+  does not unlock it.
+- **Entry is a smart order**: a LIMIT entry with stop-loss and target legs in one
+  request. The stop leg is a stop-limit with `--sl-limit-band-bps` of room. Its
+  legs' arming isn't documented, so **one 1-share order by hand first**.
+- **One token at a time.** A new token, from the website or another process,
+  ends the old one. The client caches one token in `core/cache/` and shares it
+  between processes, and regenerates on a 401, at most once a minute.
+- **History is 7 days per request**, silently truncated beyond that, so
+  `core/data.py` pages in 6-day windows.
+- **Brokerage is ₹10 flat per order** (`india_intraday_ind`); statutory charges
+  are identical.
 
 Reconcile open positions from the broker on startup rather than from your own
 state file: the broker is the authority on what you own.

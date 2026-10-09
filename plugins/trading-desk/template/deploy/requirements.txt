@@ -11,3 +11,4 @@ logzero>=1.7
 websocket-client>=1.6
 pycryptodome>=3.19
 pandas_market_calendars>=4.4   # NSE trading days and holidays
+requests>=2.31             # INDmoney INDstocks API (--broker indmoney); plain REST, no SDK

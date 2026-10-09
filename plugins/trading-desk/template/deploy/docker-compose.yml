@@ -76,6 +76,12 @@ services:
       ANGEL_CLIENT_CODE: ${ANGEL_CLIENT_CODE}
       ANGEL_MPIN: ${ANGEL_MPIN}
       ANGEL_TOTP_SECRET: ${ANGEL_TOTP_SECRET}
+      # BROKER=indmoney switches bars and brokerage to INDmoney (see .env.example)
+      BROKER: ${BROKER:-angel}
+      INDSTOCKS_CLIENT_ID: ${INDSTOCKS_CLIENT_ID:-}
+      INDSTOCKS_MPIN: ${INDSTOCKS_MPIN:-}
+      INDSTOCKS_TOTP_SECRET: ${INDSTOCKS_TOTP_SECRET:-}
+      INDSTOCKS_ACCESS_TOKEN: ${INDSTOCKS_ACCESS_TOKEN:-}
       BOT_NAME: orb
       BOT_LABEL: NSE ORB
     # Threshold and temperature come from core/calibrate.py on the in-sample

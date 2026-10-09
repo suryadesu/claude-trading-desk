@@ -36,8 +36,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import metrics as M                                    # noqa: E402
 from data import fetch_universe                        # noqa: E402
 from decision import GateDecider, RuleDecider          # noqa: E402
-from engine import Engine, EngineConfig                # noqa: E402
-from market import NSE                                 # noqa: E402
+from engine import Engine, EngineConfig, Instrument    # noqa: E402
+from market import NSE, intraday_cost_model            # noqa: E402
 from strategy import ORBConfig, ORBStrategy            # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "out"
@@ -52,7 +52,7 @@ def load_env(path: Path = ROOT / ".env") -> None:
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
 def trend_only_gate(strat):
@@ -87,7 +87,12 @@ def main() -> None:
     ap.add_argument("--or-minutes", nargs="+", type=int, default=[5, 15])
     ap.add_argument("--rr", nargs="+", type=float, default=[1.0, 1.5, 2.0, 3.0])
     ap.add_argument("--variants", nargs="+", default=["base", "retest", "fakeout"])
+    import os
+    ap.add_argument("--broker", default=os.environ.get("BROKER") or "angel",
+                    choices=["angel", "indmoney"],
+                    help="data source and brokerage: Angel One or INDmoney")
     args = ap.parse_args()
+    os.environ["BROKER"] = args.broker
 
     warm = (pd.Timestamp(args.start) - pd.Timedelta(days=args.warmup_days)).date().isoformat()
     bars = fetch_universe(symbols=args.symbols, start=warm, end=args.end, minutes=5)
@@ -97,7 +102,8 @@ def main() -> None:
     tsplit = pd.Timestamp(args.split, tz=tz)
 
     ecfg = EngineConfig(starting_equity=args.equity, risk_pct=args.risk_pct,
-                        slippage_bps=args.slippage_bps, max_positions=3)
+                        slippage_bps=args.slippage_bps, max_positions=3,
+                        instrument=Instrument(cost_model=intraday_cost_model(args.broker)))
 
     rows = []
     combos = list(itertools.product(args.or_minutes, args.rr, args.variants))
@@ -151,7 +157,7 @@ def main() -> None:
     df["net_both"] = (df.tr_net > 0) & (df.te_net > 0)
     df = df.sort_values(["consistent", "te_pre"], ascending=[False, False])
 
-    path = OUT / "sweep.csv"
+    path = OUT / ("sweep.csv" if args.broker == "angel" else f"sweep_{args.broker}.csv")
     df.to_csv(path, index=False)
     print(f"\n{'=' * 110}")
     print(df.to_string(index=False))

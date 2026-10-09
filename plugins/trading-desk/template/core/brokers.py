@@ -1,7 +1,7 @@
 """
 brokers.py
 ==========
-Where the live runner's orders go. Two implementations behind one interface:
+Where the live runner's orders go. Three implementations behind one interface:
 
   SimBroker    DEFAULT. Live NSE prices in, simulated fills out. Books fills the
                way the backtest does (signal close plus adverse slippage, stop
@@ -15,8 +15,13 @@ Where the live runner's orders go. Two implementations behind one interface:
                ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES, and it enforces its own
                caps on order value and orders per day.
 
+  IndBroker    REAL MONEY on INDmoney (INDstocks API), with the same safeguards
+               and its own confirmation, INDSTOCKS_REAL_MONEY=I_ACCEPT_REAL_LOSSES.
+               Entry is an INDstocks smart order: a LIMIT entry with stop-loss
+               and target legs attached in the same request.
+
 Exchange rules this respects (NSE/SEBI retail algo framework, April 2026): API
-orders come only from the static IP registered on the SmartAPI app, and market
+orders come only from the static IP registered with the broker, and market
 and IOC orders are not allowed. Entries are marketable LIMIT orders, priced a
 few basis points through the signal close, and the stop is part of the ROBO
 bracket, so a filled position is protected at the broker from its first second.
@@ -36,6 +41,7 @@ import pandas as pd
 from market import NSE, Market, order_charges
 
 REAL_MONEY_ENV = "ANGEL_REAL_MONEY"
+IND_REAL_MONEY_ENV = "INDSTOCKS_REAL_MONEY"
 REAL_MONEY_VALUE = "I_ACCEPT_REAL_LOSSES"
 
 Log = Callable[[str], None]
@@ -285,11 +291,11 @@ class RealMoneyRefused(SystemExit):
     pass
 
 
-def require_real_money_consent() -> None:
-    if os.environ.get(REAL_MONEY_ENV) != REAL_MONEY_VALUE:
+def require_real_money_consent(env: str = REAL_MONEY_ENV, label: str = "Angel One") -> None:
+    if os.environ.get(env) != REAL_MONEY_VALUE:
         raise RealMoneyRefused(
-            f"--real-money places REAL orders on Angel One (it has no paper sandbox).\n"
-            f"Refusing to start. To proceed knowingly, set {REAL_MONEY_ENV}={REAL_MONEY_VALUE} "
+            f"--real-money places REAL orders on {label} (it has no paper sandbox).\n"
+            f"Refusing to start. To proceed knowingly, set {env}={REAL_MONEY_VALUE} "
             f"in the environment as well.")
 
 
@@ -578,5 +584,303 @@ class AngelBroker(Broker):
         try:
             self.s.call("order", lambda c: c.placeOrderFullResponse(dict(params)),
                         idempotent=False)
+        except Exception as e:
+            self.log(f"  exit {sym} failed: {str(e)[:120]}")
+
+
+# ------------------------------------------------------------------ INDmoney
+
+class IndBroker(Broker):
+    """
+    Real orders on INDmoney through the INDstocks API. Same contract and the
+    same safeguards as AngelBroker; read its docstring and the module's first.
+
+    Entry is a smart order (POST /smart/order): a LIMIT entry with a stop-loss
+    leg (trigger + limit) and a target leg (trigger + limit) in one request.
+    If it is rejected the trade is skipped; there is no fallback to an
+    unprotected entry. The stop leg is a stop-LIMIT, because API orders may not
+    be market orders, so its limit sits --sl-limit-band-bps beyond the trigger
+    to give it room to fill on a fast move. A gap through that band can still
+    leave it unfilled; flatten_all is the backstop.
+
+    The docs do not say exactly when the legs arm or how they appear in the
+    order book. Place one 1-share order by hand and look at it in the INDmoney
+    app before trusting this (run.md, Level 7).
+    """
+    name = "indmoney"
+    fills = "broker"
+    EXIT_TAG = "XIT"
+    LIVE = ("queued", "o-pending", "sl-pending", "processing", "initiated", "pending",
+            "modified", "partially filled", "created", "open", "trigger pending")
+    DEAD = ("cancelled", "failed", "aborted", "expired", "rejected",
+            "partially filled - cancelled", "partially filled - expired")
+
+    def __init__(self, state_path: Path, max_order_value: float = 20_000.0,
+                 max_orders_per_day: int = 3, entry_band_bps: float = 10.0,
+                 sl_limit_band_bps: float = 30.0, fill_timeout_s: float = 30.0,
+                 market: Market = NSE, log: Log = print, dry_run: bool = False,
+                 api=None):
+        require_real_money_consent(IND_REAL_MONEY_ENV, "INDmoney")
+        super().__init__(market, log, dry_run)
+        if api is None:
+            import indstocks as api
+        self.api = api
+        self.s = api.session()
+        self.state_path = Path(state_path)
+        self.max_order_value = max_order_value
+        self.max_orders_per_day = max_orders_per_day
+        self.entry_band_bps = entry_band_bps
+        self.sl_limit_band_bps = sl_limit_band_bps
+        self.fill_timeout_s = fill_timeout_s
+        self.state = {"date": "", "orders": 0}
+        if self.state_path.exists():
+            try:
+                self.state.update(json.loads(self.state_path.read_text()))
+            except json.JSONDecodeError:
+                pass
+
+    # -- small helpers ---------------------------------------------
+
+    _today_orders = AngelBroker._today_orders
+    _count_order = AngelBroker._count_order
+
+    @staticmethod
+    def _guard(params: dict) -> dict:
+        """The exchange rules, enforced in code: limit orders only, never IOC."""
+        if params.get("order_type") != "LIMIT":
+            raise ValueError(f"refusing {params.get('order_type')} order: API orders must be limit")
+        if params.get("validity", "DAY") != "DAY":
+            raise ValueError("refusing non-DAY order: IOC is not allowed for API orders")
+        return params
+
+    @staticmethod
+    def _rows(resp) -> List[dict]:
+        """The list inside a response, wherever this endpoint keeps it."""
+        d = resp.get("data") if isinstance(resp, dict) else resp
+        if isinstance(d, list):
+            return [r for r in d if isinstance(r, dict)]
+        if isinstance(d, dict):
+            for v in d.values():
+                if isinstance(v, list):
+                    return [r for r in v if isinstance(r, dict)]
+        return []
+
+    @staticmethod
+    def _f(v, default: float = 0.0) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    def _symbol_for(self, row: dict) -> str:
+        sid = str(row.get("security_id") or "")
+        for name, sc in self.api.scrips().items():
+            if sc.token == sid:
+                return name
+        return str(row.get("symbol") or sid).upper().removesuffix("-EQ")
+
+    # -- account ---------------------------------------------------
+
+    def account(self) -> dict:
+        resp = self.s.call("read", "GET", "/funds") or {}
+        d = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+        avl = d.get("detailed_avl_balance") or {}
+        cash = self._f(avl.get("eq_mis"), self._f(d.get("withdrawal_balance")))
+        equity = (self._f(d.get("sod_balance")) + self._f(d.get("realized_pnl"))
+                  + self._f(d.get("unrealized_pnl")))
+        return {"equity": equity or cash, "cash": cash, "buying_power": cash,
+                "multiplier": 1.0}
+
+    def _positions_raw(self) -> List[dict]:
+        resp = self.s.call("read", "GET", "/portfolio/positions",
+                           params={"segment": "equity", "product": "intraday"})
+        return [p for p in self._rows(resp) if int(self._f(p.get("net_qty"))) != 0]
+
+    def positions(self) -> Dict[str, int]:
+        return {self._symbol_for(p): int(self._f(p.get("net_qty")))
+                for p in self._positions_raw()}
+
+    def _order_book(self) -> List[dict]:
+        return self._rows(self.s.call("read", "GET", "/order-book"))
+
+    # -- entry -----------------------------------------------------
+
+    def bracket_params(self, symbol: str, side: int, qty: int, stop: float,
+                       target: float, ref_price: float) -> dict:
+        """The exact smart order this broker would send. Pure, so it can be tested."""
+        sc = self.api.scrip(symbol)
+        tick = sc.tick_size
+        rt = self.api.round_to_tick
+        band = self.entry_band_bps / 10_000
+        sl_band = self.sl_limit_band_bps / 10_000
+        buy = side > 0
+        limit = rt(ref_price * (1 + band if buy else 1 - band), tick)
+        sl_trig = rt(stop, tick)
+        # A long's stop sells, so its limit sits BELOW the trigger; a short's above.
+        sl_lim = rt(stop * (1 - sl_band if buy else 1 + sl_band), tick)
+        tgt = rt(target, tick)
+        tag = (self.clock.now().strftime("%y%m%d") + symbol[:10] + ("L" if buy else "S"))
+        return self._guard({
+            "txn_type": "BUY" if buy else "SELL", "exchange": "NSE", "segment": "EQUITY",
+            "product": "INTRADAY", "order_type": "LIMIT", "validity": "DAY",
+            "security_id": sc.token, "qty": int(qty), "limit_price": limit,
+            "sl_trigger_price": sl_trig, "sl_limit_price": sl_lim,
+            "tgt_trigger_price": tgt, "tgt_limit_price": tgt,
+            "algo_id": self.api.ALGO_ID_NSE, "remarks": tag,
+        })
+
+    def submit_bracket(self, symbol, side, qty, stop, target, ref_price,
+                       bar_ts=None) -> Optional[dict]:
+        cur = self.market.currency
+        value = qty * ref_price
+        if value > self.max_order_value:
+            self.log(f"  {symbol}: REFUSED, {cur}{value:,.0f} exceeds "
+                     f"--max-order-value {cur}{self.max_order_value:,.0f}")
+            return None
+        if self._today_orders() >= self.max_orders_per_day:
+            self.log(f"  {symbol}: REFUSED, already {self.max_orders_per_day} orders today "
+                     f"(--max-orders-per-day)")
+            return None
+        params = self.bracket_params(symbol, side, qty, stop, target, ref_price)
+        if self.dry_run:
+            self.log(f"  DRY RUN would send to INDmoney: {json.dumps(params)}")
+            return None
+
+        for o in self._order_book():
+            if o.get("remarks") == params["remarks"]:
+                self.log(f"  {symbol}: order {params['remarks']} already exists "
+                         f"({o.get('status')}), not resending")
+                return None
+
+        self._count_order()
+        try:
+            resp = self.s.call("order", "POST", "/smart/order", body=dict(params),
+                               idempotent=False)
+        except Exception as e:
+            self.log(f"  {symbol}: smart order not accepted ({str(e)[:140]}); no position taken")
+            return None
+        data = (resp or {}).get("data") or {}
+        ids = [str(o.get("order_id")) for o in (data.get("order_data") or [])
+               if isinstance(o, dict) and o.get("order_id")]
+        child = data.get("child_order_details") or resp.get("child_order_details") or []
+        if isinstance(child, dict):
+            child = [child]
+        ids += [str(o.get("order_id")) for o in child if isinstance(o, dict) and o.get("order_id")]
+        if (resp or {}).get("status") == "error" or not ids:
+            self.log(f"  {symbol}: smart order rejected ({(resp or {}).get('message')}); "
+                     f"no position taken")
+            return None
+        entry_id = next((i for i in ids if i.startswith("EQ-")), ids[0])
+        return self._await_fill(symbol, entry_id, ids, params)
+
+    def _find(self, oid: str, tag: str) -> dict:
+        book = self._order_book()
+        for o in book:
+            if str(o.get("id")) == oid:
+                return o
+        for o in book:                     # fall back to our tag on the entry side
+            if o.get("remarks") == tag and str(o.get("txn_type", "")).upper() in ("BUY", "SELL"):
+                return o
+        return {}
+
+    def _cancel_ids(self, ids: List[str]) -> None:
+        for oid in ids:
+            path = "/smart/order/cancel" if not oid.startswith("EQ-") else "/order/cancel"
+            try:
+                self.s.call("order", "POST", path,
+                            body={"order_id": oid, "segment": "EQUITY"}, idempotent=False)
+            except Exception as e:
+                self.log(f"  cancel {oid} failed: {str(e)[:120]}")
+
+    def _await_fill(self, symbol, entry_id, ids, params) -> Optional[dict]:
+        deadline = time.monotonic() + self.fill_timeout_s
+        st = {}
+        while time.monotonic() < deadline:
+            st = self._find(entry_id, params["remarks"])
+            status = str(st.get("status") or "").lower()
+            if status == "success":
+                break
+            if status in self.DEAD:
+                self.log(f"  {symbol}: smart order {status}")
+                break
+            time.sleep(2.0)
+        else:
+            # Stale setup: cancel the entry, then trust the book. The legs are
+            # cancelled only if nothing filled; a partial fill keeps its stop.
+            self._cancel_ids([entry_id])
+            time.sleep(1.0)
+            st = self._find(entry_id, params["remarks"])
+        filled = int(self._f(st.get("traded_qty")))
+        if filled <= 0:
+            self._cancel_ids([i for i in ids if i != entry_id])
+            self.log(f"  {symbol}: smart order not filled within "
+                     f"{self.fill_timeout_s:.0f}s, cancelled")
+            return None
+        avg = self._f(st.get("traded_price"), params["limit_price"])
+        return {"id": entry_id, "leg_ids": ids, "symbol": symbol, "qty": filled,
+                "side": params["txn_type"].lower(), "status": "filled",
+                "fill": avg, "order": params}
+
+    # -- exit ------------------------------------------------------
+
+    def _working(self) -> List[dict]:
+        return [o for o in self._order_book() if str(o.get("status", "")).lower() in self.LIVE]
+
+    def _cancel(self, orders: List[dict]) -> None:
+        self._cancel_ids([str(o.get("id")) for o in orders if o.get("id")])
+
+    def flatten_all(self, reason: str = "EOD", now=None) -> None:
+        """AngelBroker.flatten_all's algorithm: cancel, then limit exits, never two at once."""
+        held, working = self._positions_raw(), self._working()
+        if not held and not working:
+            return
+        self.log(f"flattening: {len(held)} position(s) "
+                 f"{[self._symbol_for(p) for p in held]}, {len(working)} working order(s)")
+        if self.dry_run:
+            return
+        self._cancel(working)
+
+        deadline = (self.market.open.hour * 60 + self.market.open.minute
+                    + self.market.rth_minutes - 18)          # 15:12 on NSE
+        while True:
+            time.sleep(3.0)
+            ours = [o for o in self._working()
+                    if str(o.get("remarks", "")).startswith(self.EXIT_TAG)]
+            if ours:
+                self._cancel(ours)
+                time.sleep(2.0)
+            held = self._positions_raw()
+            if not held:
+                self.log("flat")
+                return
+            t = self.clock.now()
+            if t.hour * 60 + t.minute >= deadline:
+                self.log(f"!!! STILL HOLDING {[self._symbol_for(p) for p in held]} at "
+                         f"{t:%H:%M}. INDmoney's own intraday square-off should close it, "
+                         f"at a fee; its time is not documented. Check the account now.")
+                return
+            for p in held:
+                self._exit_with_limit(p)
+            time.sleep(5.0)
+
+    def _exit_with_limit(self, p: dict) -> None:
+        qty = int(self._f(p.get("net_qty")))
+        sym = self._symbol_for(p)
+        sc = self.api.scrip(sym)
+        last = self.api.ltp([sym]).get(sym, 0.0)
+        if last <= 0:
+            return
+        sell = qty > 0
+        band = self.entry_band_bps / 10_000 * 3        # cross the spread decisively
+        price = self.api.round_to_tick(last * (1 - band if sell else 1 + band), sc.tick_size)
+        params = self._guard({
+            "txn_type": "SELL" if sell else "BUY", "exchange": "NSE", "segment": "EQUITY",
+            "product": "INTRADAY", "order_type": "LIMIT", "validity": "DAY",
+            "security_id": sc.token, "qty": abs(qty), "limit_price": price,
+            "algo_id": self.api.ALGO_ID_NSE,
+            "remarks": self.EXIT_TAG + self.clock.now().strftime("%H%M%S") + sym[:10],
+        })
+        try:
+            self.s.call("order", "POST", "/order", body=dict(params), idempotent=False)
         except Exception as e:
             self.log(f"  exit {sym} failed: {str(e)[:120]}")

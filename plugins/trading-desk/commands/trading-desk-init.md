@@ -18,9 +18,12 @@ Set up a trading workspace for the user in the current directory.
 6. Tell the user the three things they can do next, shortest first:
    - `python3 example_sma/run_backtest.py` needs no API key at all
    - `python3 orb/run_backtest.py --arms rules gated` needs an Angel One
-     SmartAPI key (free; the four ANGEL_* values in `.env`)
+     SmartAPI key (free; the four ANGEL_* values in `.env`), or, with
+     `--broker indmoney`, INDmoney INDstocks access (the three INDSTOCKS_*
+     values)
    - `python3 orb/live.py --once --dry-run` runs the live bot with simulated fills.
-     Real orders need `--real-money` and `ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES`;
+     Real orders need `--real-money` and `ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES`
+     (INDmoney: `INDSTOCKS_REAL_MONEY`);
      never set either on the user's behalf
    - `python3 dashboard/server.py` opens the desk
    - the `laya` arm needs the free Laya model running locally:

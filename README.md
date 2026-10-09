@@ -6,10 +6,11 @@ paper trading them, and hosting them 24/7 for nothing.
 Everything in this stack has a free tier. There is no paid step anywhere.
 
 > **This branch (`laya-angel`) trades Indian stocks on NSE.** Data comes from
-> Angel One's free SmartAPI, the decision model is the open-source
+> Angel One's free SmartAPI or, with `--broker indmoney`, INDmoney's free
+> INDstocks API. The decision model is the open-source
 > [Laya](https://huggingface.co/convaiinnovations/laya), and the live bot books
-> **simulated** fills by default. Angel One has no paper-trading sandbox, so real
-> orders happen only with `--real-money` plus an explicit environment
+> **simulated** fills by default. Neither broker has a paper-trading sandbox, so
+> real orders happen only with `--real-money` plus an explicit environment
 > confirmation. See [run.md](run.md) for setup and testing.
 
 ## Install
@@ -96,8 +97,9 @@ pipeline, not an edge, and the harness will tell you so.
 | Thing | Tier | Cost |
 | --- | --- | --- |
 | Angel One SmartAPI: NSE candles, live data, order API | free with an Angel One account | ₹0 |
+| or INDmoney INDstocks API: the same, selected with `--broker indmoney` | free with an INDmoney account | ₹0 |
 | Simulated fills (the default) | local | ₹0 |
-| Real orders (only with `--real-money`) | Angel brokerage + statutory charges | ₹20 or 0.1% per order, plus STT, exchange, SEBI, stamp duty and GST |
+| Real orders (only with `--real-money`) | brokerage + statutory charges | Angel ₹20 or 0.1% per order, INDmoney ₹10 flat, plus STT, exchange, SEBI, stamp duty and GST |
 | Oracle Cloud Always Free VM (2 ARM cores, 12 GB) | free forever | ₹0 |
 | Yahoo data via yfinance (daily example only) | free | ₹0 |
 | Laya decision model (Apache-2.0, runs on the same VM) | open source | ₹0 |

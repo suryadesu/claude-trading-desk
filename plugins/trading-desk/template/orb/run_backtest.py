@@ -29,8 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import metrics as M                                    # noqa: E402
 from data import DEFAULT_UNIVERSE, fetch_universe      # noqa: E402
 from decision import GateDecider, ModelDecider, RuleDecider  # noqa: E402
-from engine import Engine, EngineConfig                # noqa: E402
-from market import NSE                                 # noqa: E402
+from engine import Engine, EngineConfig, Instrument    # noqa: E402
+from market import NSE, intraday_cost_model            # noqa: E402
 from strategy import ORBConfig, ORBStrategy            # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "out"
@@ -45,7 +45,7 @@ def load_env(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -109,7 +109,15 @@ def parse_args() -> argparse.Namespace:
                         "request per state, which hosted Jev needs")
 
     p.add_argument("--tag", default="", help="suffix for output filenames")
-    return p.parse_args()
+    p.add_argument("--broker", default=os.environ.get("BROKER") or "angel",
+                   choices=["angel", "indmoney"],
+                   help="where bars come from and whose brokerage is charged: Angel One "
+                        "SmartAPI or INDmoney INDstocks (default: BROKER in .env, else angel)")
+    args = p.parse_args()
+    os.environ["BROKER"] = args.broker          # core/data.py reads it
+    if args.broker != "angel":                  # keep INDmoney results apart
+        args.tag = "_".join(t for t in (args.broker, args.tag) if t)
+    return args
 
 
 def build_plans(args) -> dict:
@@ -153,7 +161,9 @@ def main() -> None:
         starting_equity=args.equity, risk_pct=args.risk_pct,
         max_positions=args.max_positions, slippage_bps=args.slippage_bps,
         fill=args.fill, ambiguous=args.ambiguous, allow_shorts=not args.no_shorts,
+        instrument=Instrument(cost_model=intraday_cost_model(args.broker)),
     )
+    print(f"[costs] {args.broker} brokerage ({ecfg.instrument.cost_model})")
 
     results, all_trades = {}, {}
     for arm in args.arms:

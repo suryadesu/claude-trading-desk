@@ -2,7 +2,8 @@
 """
 live.py
 =======
-Runs the validated ORB strategy live on NSE, with Angel One for data.
+Runs the validated ORB strategy live on NSE, with Angel One (default) or
+INDmoney (--broker indmoney) for data and, only with --real-money, orders.
 
 It imports `ORBStrategy` and `ModelDecider` directly from the backtest. Nothing is
 reimplemented here, because a second copy of the logic drifts from the one you
@@ -11,21 +12,24 @@ measured and then your backtest no longer describes what is running.
   python3 live.py --once --dry-run      # one cycle, no fills, safe any time
   python3 live.py --replay 2026-10-06   # walk a past session through this code, offline fills
   python3 live.py                       # SIMULATED fills on live prices (the default)
-  python3 live.py --real-money          # REAL orders on Angel One. Read run.md first.
+  python3 live.py --broker indmoney     # the same, with INDmoney data and charges
+  python3 live.py --real-money          # REAL orders on the broker. Read run.md first.
 
-Simulated by default. Angel One has no paper-trading sandbox, so the only safe
-default is to read live prices and book fills locally with the backtest's own
-rules (core/brokers.py SimBroker). --real-money switches to AngelBroker, which
-also needs ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES in the environment and enforces
-its own caps on order value and orders per day.
+Simulated by default. Neither Angel One nor INDmoney has a paper-trading
+sandbox, so the only safe default is to read live prices and book fills locally
+with the backtest's own rules (core/brokers.py SimBroker). --real-money switches
+to AngelBroker (needs ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES) or, with --broker
+indmoney, IndBroker (needs INDSTOCKS_REAL_MONEY=I_ACCEPT_REAL_LOSSES). Both
+enforce their own caps on order value and orders per day.
 
 Safety, all on by default:
   - simulated fills unless --real-money AND the environment variable agree
   - a kill switch file (out/STOP) halts new entries without killing the process
   - a daily loss limit flattens and stands down
-  - real entries are ROBO bracket orders, so the stop exists at the broker
+  - real entries carry their stop at the broker (Angel ROBO bracket, INDmoney
+    smart order with stop and target legs)
   - refuses any order whose stop is on the wrong side of the fill
-  - flattens at 15:05 IST, before Angel's own 15:15 square-off
+  - flattens at 15:05 IST, before the broker's own intraday square-off
 
 Every decision and fill is logged in the backtest's schema so live results can be
 reconciled against the backtest's distribution. Realised slippage versus the 2 bp
@@ -50,11 +54,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "core"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from brokers import AngelBroker, Broker, SimBroker                 # noqa: E402
+from brokers import AngelBroker, Broker, IndBroker, SimBroker      # noqa: E402
 from contracts import Action, ENTRIES                                # noqa: E402
 from data import fetch_universe                                      # noqa: E402
 from decision import ModelDecider, RuleDecider                       # noqa: E402
-from market import NSE                                               # noqa: E402
+from market import NSE, intraday_cost_model                          # noqa: E402
 from strategy import ORBConfig, ORBStrategy                          # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "out"
@@ -73,7 +77,7 @@ def load_env(path: Path = ROOT / ".env") -> None:
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
 def log(msg: str) -> None:
@@ -315,7 +319,8 @@ class LiveRunner:
             f.unlink(missing_ok=True)
         self.broker = SimBroker(OUT / "replay_sim_state.json", OUT / "replay_sim_trades.jsonl",
                                 equity=self.args.sim_equity,
-                                slippage_bps=self.args.slippage_bps, log=log)
+                                slippage_bps=self.args.slippage_bps,
+                                cost_model=intraday_cost_model(self.args.broker), log=log)
         self.state = State(OUT / "replay_state.json")
         ref = dt.date.fromisoformat(day)
         bars = self.bars(as_of=ref)
@@ -371,30 +376,46 @@ class LiveRunner:
 
 def make_broker(args) -> Broker:
     if args.real_money:
-        b = AngelBroker(OUT / "angel_state.json", max_order_value=args.max_order_value,
-                        max_orders_per_day=args.max_orders_per_day,
-                        entry_band_bps=args.entry_band_bps, robo_units=args.robo_units,
-                        log=log, dry_run=args.dry_run)
+        if args.broker == "indmoney":
+            b = IndBroker(OUT / "indmoney_state.json", max_order_value=args.max_order_value,
+                          max_orders_per_day=args.max_orders_per_day,
+                          entry_band_bps=args.entry_band_bps,
+                          sl_limit_band_bps=args.sl_limit_band_bps,
+                          log=log, dry_run=args.dry_run)
+            label, ip_where = "INDmoney", "your INDstocks API settings"
+        else:
+            b = AngelBroker(OUT / "angel_state.json", max_order_value=args.max_order_value,
+                            max_orders_per_day=args.max_orders_per_day,
+                            entry_band_bps=args.entry_band_bps, robo_units=args.robo_units,
+                            log=log, dry_run=args.dry_run)
+            label, ip_where = "Angel One", "your SmartAPI app"
         acct = b.account()
         log("=" * 72)
-        log("REAL MONEY MODE: orders go to Angel One and are NOT simulated.")
+        log(f"REAL MONEY MODE: orders go to {label} and are NOT simulated.")
         log(f"  account equity {CUR}{acct['equity']:,.2f}, available {CUR}{acct['cash']:,.2f}")
         log(f"  caps: {CUR}{args.max_order_value:,.0f} per order, "
             f"{args.max_orders_per_day} orders per day, daily loss {args.daily_loss_pct}%")
-        log("  orders are only accepted from the static IP registered on your SmartAPI app")
+        log(f"  orders are only accepted from the static IP registered in {ip_where}")
         log(f"  dry run: {args.dry_run}.  Ctrl+C now to abort; starting in 10 s.")
         log("=" * 72)
         time.sleep(10)
         return b
-    return SimBroker(OUT / "sim_state.json", OUT / "sim_trades.jsonl",
+    # Angel keeps the original file names; INDmoney's simulator has its own books.
+    sfx = "" if args.broker == "angel" else f"_{args.broker}"
+    return SimBroker(OUT / f"sim_state{sfx}.json", OUT / f"sim_trades{sfx}.jsonl",
                      equity=args.sim_equity, slippage_bps=args.slippage_bps,
+                     cost_model=intraday_cost_model(args.broker),
                      log=log, dry_run=args.dry_run)
 
 
 def parse_args():
     p = argparse.ArgumentParser(
         description="Run the ORB strategy on NSE: simulated fills by default, "
-                    "real Angel One orders only with --real-money.")
+                    "real Angel One or INDmoney orders only with --real-money.")
+    p.add_argument("--broker", default=os.environ.get("BROKER") or "angel",
+                   choices=["angel", "indmoney"],
+                   help="where bars come from and whose brokerage is charged: Angel One "
+                        "SmartAPI or INDmoney INDstocks (default: BROKER in .env, else angel)")
     p.add_argument("--symbols", nargs="+",
                    default=["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY",
                             "TCS", "SBIN", "AXISBANK", "BHARTIARTL"])
@@ -412,7 +433,7 @@ def parse_args():
     p.add_argument("--rr", type=float, default=2.0)
     p.add_argument("--last-entry-min", type=int, default=135, help="135 = 11:30 IST")
     p.add_argument("--flat-at-minute", type=int, default=MKT.flat_at_minute,
-                   help=f"{MKT.flat_at_minute} = 15:05 IST, before Angel's 15:15 square-off")
+                   help=f"{MKT.flat_at_minute} = 15:05 IST, before the broker's square-off")
     p.add_argument("--risk-pct", type=float, default=0.005)
     p.add_argument("--max-notional-pct", type=float, default=1.0)
     p.add_argument("--max-positions", type=int, default=3)
@@ -430,18 +451,24 @@ def parse_args():
                      help="starting capital in rupees for the simulator")
     sim.add_argument("--slippage-bps", type=float, default=2.0)
 
-    real = p.add_argument_group("REAL MONEY on Angel One")
+    real = p.add_argument_group("REAL MONEY on Angel One or INDmoney")
     real.add_argument("--real-money", action="store_true",
-                      help="place real orders. Also needs ANGEL_REAL_MONEY=I_ACCEPT_REAL_LOSSES")
+                      help="place real orders. Also needs ANGEL_REAL_MONEY (or, with --broker "
+                           "indmoney, INDSTOCKS_REAL_MONEY) = I_ACCEPT_REAL_LOSSES")
     real.add_argument("--max-order-value", type=float, default=20_000.0,
                       help="refuse any single order above this many rupees")
     real.add_argument("--max-orders-per-day", type=int, default=3)
     real.add_argument("--entry-band-bps", type=float, default=10.0,
                       help="how far through the signal close the entry LIMIT is priced")
     real.add_argument("--robo-units", default="points", choices=["points", "price"],
-                      help="how ROBO squareoff/stoploss are sent: rupees from entry "
-                           "(points) or absolute prices. Confirm on your account first.")
-    return p.parse_args()
+                      help="Angel only: how ROBO squareoff/stoploss are sent: rupees from "
+                           "entry (points) or absolute prices. Confirm on your account first.")
+    real.add_argument("--sl-limit-band-bps", type=float, default=30.0,
+                      help="INDmoney only: how far beyond the stop trigger the stop-loss "
+                           "leg's limit price sits")
+    args = p.parse_args()
+    os.environ["BROKER"] = args.broker          # core/data.py reads it
+    return args
 
 
 def main() -> None:
